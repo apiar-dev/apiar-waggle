@@ -1,0 +1,2 @@
+# Integration test directories, removed at the end of each run
+/.tests/

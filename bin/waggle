@@ -1,0 +1,104 @@
+#!/bin/sh
+# waggle, from the host (README): builds waggle's image from this repository, then runs the command inside it, with the
+# Docker socket, the configuration file and the state directory. Nothing to install but Docker.
+#
+#   WAGGLE_CONFIG   the configuration file, ~/.config/waggle/config.yaml by default;
+#   WAGGLE_STATE    the state directory (authorities, written configuration), ~/.local/state/waggle by default;
+#   WAGGLE_IMAGE    the image name, waggle:local by default.
+#
+# `trust` runs on the host itself: it trusts an instance's authority in the macOS keychain.
+set -eu
+
+# Follow symlinks back to the script itself: a link in the PATH (~/.local/bin/waggle) must still find the repository
+self=$0
+while [ -L "$self" ]; do
+	target=$(readlink "$self")
+	case "$target" in
+	/*) self=$target ;;
+	*) self=$(dirname -- "$self")/$target ;;
+	esac
+done
+root=$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)
+config=${WAGGLE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/waggle/config.yaml}
+state=${WAGGLE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/waggle}
+image=${WAGGLE_IMAGE:-waggle:local}
+os=${WAGGLE_OS:-$(uname -s)}
+
+# trusted CERT: whether the user's trust settings already hold this certificate. macOS files them under the
+# certificate's SHA-1 fingerprint.
+trusted() {
+	fingerprint=$(openssl x509 -in "$1" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
+	settings=$(mktemp)
+	held=1
+	if security trust-settings-export "$settings" >/dev/null 2>&1 &&
+		plutil -p "$settings" | grep -qi "\"$fingerprint\""; then
+		held=0
+	fi
+	rm -f "$settings"
+	return "$held"
+}
+
+case "${1:-help}" in
+help | -h | --help)
+	docker run --rm "$image" help 2>/dev/null || sed -n '2,10p' "$self"
+	exit 0
+	;;
+trust)
+	# The authority goes to the login keychain, trusted for TLS: macOS asks for the session password, once per
+	# authority. An authority already trusted is left alone, so that running it again asks nothing.
+	name=${2:-*}
+	found=0
+	for cert in "$state"/$name/ca/ca.crt; do
+		[ -f "$cert" ] || continue
+		found=1
+		case "$os" in
+		Darwin)
+			if trusted "$cert"; then
+				echo "waggle: $cert is already trusted"
+				continue
+			fi
+			echo "waggle: trusting $cert in the login keychain"
+			security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$cert"
+			;;
+		*)
+			echo "waggle: on $os, copy $cert to /usr/local/share/ca-certificates/waggle.crt, then run update-ca-certificates as root."
+			echo "  Chrome and Firefox keep their own store: see the README."
+			;;
+		esac
+	done
+	[ "$found" = 1 ] || { echo "waggle: no authority in $state: run waggle up first" >&2; exit 1; }
+	exit 0
+	;;
+esac
+
+if [ ! -f "$config" ]; then
+	echo "waggle: no configuration at $config" >&2
+	echo "  An example, to copy and adapt: $root/config.example.yaml" >&2
+	exit 1
+fi
+mkdir -p "$state"
+
+# Docker's cache makes the build instant when nothing changed
+version=$(git -C "$root" describe --always --dirty 2>/dev/null || echo dev)
+docker build --quiet --build-arg VERSION="$version" --tag "$image" "$root" >/dev/null
+
+# On Linux, the command reads the host's interfaces to check that an address belongs to a VPN, and writes the state
+# directory as the user
+network=bridge
+user=
+if [ "$os" = Linux ]; then
+	network=host
+	user="--user $(id -u):$(id -g) --group-add $(stat -c %g /var/run/docker.sock)"
+fi
+
+# shellcheck disable=SC2086 # $user splits into options
+exec docker run --rm --interactive --network "$network" $user \
+	--volume /var/run/docker.sock:/var/run/docker.sock \
+	--volume "$config:/config.yaml:ro" \
+	--volume "$state:$state" \
+	--env HOME=/tmp \
+	--env WAGGLE_STATE="$state" \
+	--env WAGGLE_IMAGE="$image" \
+	--env WAGGLE_OS="$os" \
+	--env WAGGLE_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
+	"$image" "$@"

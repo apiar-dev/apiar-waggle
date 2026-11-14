@@ -64,9 +64,10 @@ Une règle s'applique à tous : **une URL de dev n'est jamais exposée sur inter
      son installation dit « waggle installé ».
 
 2. **Le contrat d'un projet.**
-   - Chaque service routé porte `traefik.enable=true` et `waggle.projet=<nom du projet>`,
+   - Chaque service routé porte `traefik.enable=true` et `waggle.project=<nom du projet>`,
      et déclare ses routes par étiquettes. L'étiquette de projet dit qui la lit, comme les
-     étiquettes `traefik.*` *(tranché avec Benjamin, 2026-11-14)*. Les routes :
+     étiquettes `traefik.*` *(tranché avec Benjamin, 2026-11-14 ; en anglais, comme tout
+     identifiant)*. Les routes :
      - des routeurs HTTP (`Host`, `HostRegexp`) sur `p80`. Un routeur HTTP qui ne nomme
        pas de point d'entrée y va de lui-même ;
      - ou des routeurs TCP (`HostSNI`, en passage TLS) sur `p443` et les ports du
@@ -164,7 +165,7 @@ Une règle s'applique à tous : **une URL de dev n'est jamais exposée sur inter
      l'autre en demandant leur nom.
    - Sur un serveur, waggle lève donc une instance par VPN — un Traefik, son compagnon, son
      réseau, et un DNS si besoin —, liée à l'adresse de ce VPN.
-     - Elle ne lit que ses projets, par une contrainte de Traefik sur `waggle.projet`.
+     - Elle ne lit que ses projets, par une contrainte de Traefik sur `waggle.project`.
      - Deux projets de deux VPN ne partagent aucun réseau.
    - La règle de la décision 4, posée par adresse, ferme aussi chaque instance aux membres
      des autres VPN : leurs paquets arrivent par une autre interface (constaté, § Les
@@ -284,7 +285,7 @@ Ils sont préparés, pas faits. La marche à suivre est dans
   Un projet comme un autre déjà servi ne demande rien de plus.
 - **Par worktree** : rien.
 - **Les projets existants migrent**, chacun par sa propre décision :
-  - `traefik.enable` et `waggle.projet` sur leurs services routés ;
+  - `traefik.enable` et `waggle.project` sur leurs services routés ;
   - leur proxy retiré ;
   - leur installation, qui renvoie à waggle.
   Un projet qui nomme déjà ses points d'entrée d'après leur port garde ses routes. Un projet

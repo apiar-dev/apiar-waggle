@@ -1,21 +1,24 @@
-# Les essais de l'ADR-0001 qui demandent un serveur ou un appareil
+# Les essais qui demandent un serveur ou un appareil
 
-Ces essais ne se font pas sur un Mac seul. Ils sont préparés ici, à lancer à la main. Chacun
-dit ce qu'il établit, comment le lancer, ce qu'on attend, et comment le retirer.
+Ces essais ne se font pas sur un Mac seul. Ils sont préparés ici, à lancer à la main, une fois
+waggle installé (`install.sh`, puis `waggle up`). Chacun dit ce qu'il établit, comment le lancer, et
+ce qu'on attend.
+
+Ce qu'un Mac seul pouvait éprouver l'est déjà, par `make integration` et `make firewall`. En
+particulier, la règle de pare-feu, posée par la vraie commande `waggle firewall`, a été
+éprouvée dans un Docker-in-Docker.
 
 Les adresses sont celles d'un exemple, à adapter :
-- un serveur dont l'interface WireGuard `wg0` porte `10.8.0.1` ;
+- un serveur dont l'interface WireGuard `wg0` porte `10.8.0.1`, avec une instance de waggle
+  sur cette adresse, nommée ici `team` ;
 - un Mac, membre du tunnel en `10.8.0.2`.
 
 ## 1. La règle `DOCKER-USER`, sur le vrai serveur, vérifiée hors du tunnel
 
-**Ce qu'il établit.** Il établit trois choses (ADR-0001, décision 4) :
-- un port publié sur l'adresse du VPN reste joignable par une autre interface ;
-- la règle le ferme, sans couper les membres du tunnel ;
-- la règle survit, ou non, à un redémarrage de Docker et du serveur.
-
-La logique a déjà été éprouvée dans un Docker-in-Docker. Reste le vrai noyau, le vrai
-WireGuard et la vraie persistance.
+**Ce qu'il établit** (ADR-0001, décision 4) :
+- sans la règle, le port publié sur l'adresse du VPN est joignable par une autre interface ;
+- la règle de waggle le ferme, sans couper les membres du tunnel ;
+- elle revient après un redémarrage de Docker, et du serveur.
 
 **Le voisin.** On le simule par un espace de noms réseau, relié au serveur par une paire
 `veth`. Son paquet vers `10.8.0.1` arrive par une autre interface que `wg0`, comme celui
@@ -25,62 +28,66 @@ machine du réseau privé de l'hébergeur : `ip route add 10.8.0.1/32 via <adres
 Sur le serveur, en root :
 
 ```bash
-VPN=10.8.0.1 WG=wg0
-docker run -d --rm --name waggle-essai -p $VPN:18081:80 nginx:1.27-alpine
+VPN=10.8.0.1 WG=wg0 INSTANCE=team
 ip netns add waggle-dehors
 ip link add waggle-h type veth peer name waggle-d
 ip link set waggle-d netns waggle-dehors
 ip addr add 192.0.2.1/30 dev waggle-h && ip link set waggle-h up
 ip netns exec waggle-dehors sh -c "ip addr add 192.0.2.2/30 dev waggle-d && ip link set waggle-d up && ip route add $VPN/32 via 192.0.2.1"
-dehors() { ip netns exec waggle-dehors curl -s -m 3 -o /dev/null -w '%{http_code}\n' http://$VPN:18081/; }
+dehors() { ip netns exec waggle-dehors curl -s -m 3 -o /dev/null -w '%{http_code}\n' http://$VPN/; }
 ```
 
 Puis, dans l'ordre :
 
 | Étape | Commande | Attendu |
 | --- | --- | --- |
-| Sans règle, le voisin | `dehors` | `200` : c'est la fuite. Avec `000`, Docker ferme déjà ce chemin sur ce serveur, et la règle reste en défense |
-| Sans règle, le Mac, tunnel actif | `curl -s -m 3 -o /dev/null -w '%{http_code}\n' http://10.8.0.1:18081/` | `200` |
-| Poser la règle | `iptables -I DOCKER-USER -m conntrack --ctorigdst $VPN --ctdir ORIGINAL ! -i $WG -j DROP` | |
-| Avec la règle, le voisin | `dehors` | `000` |
-| Avec la règle, le Mac | la même commande depuis le Mac | `200` |
-| Après un redémarrage de Docker | `systemctl restart docker && iptables -S DOCKER-USER`, puis relancer le conteneur | à noter : la règle est-elle encore là ? |
+| La règle de waggle | `iptables -S DOCKER-USER \| grep ctorigdst` | la règle, avec `--ctdir ORIGINAL` |
+| Le voisin | `dehors` | `000` |
+| Le Mac, tunnel actif | `curl -s -m 3 -o /dev/null -w '%{http_code}\n' http://10.8.0.1/` | `404` : Traefik répond, aucune route sans nom |
+| Sans la règle | `docker stop waggle-$INSTANCE-firewall-1`, puis `iptables -D DOCKER-USER -m conntrack --ctorigdst $VPN --ctdir ORIGINAL ! -i $WG -j DROP`, puis `dehors` | `404` : c'est la fuite que la règle ferme. Avec `000`, Docker ferme déjà ce chemin sur ce serveur, et la règle reste en défense |
+| La règle reposée | `docker start waggle-$INSTANCE-firewall-1`, puis `dehors` | `000` |
+| Docker redémarré | `systemctl restart docker`, une minute, puis `dehors` | `000` : le service `firewall` redémarre avec Docker et repose la règle |
+| Le serveur redémarré | `reboot`, puis la même vérification | `000` |
 
-Le retrait :
+À noter : le délai entre le démarrage de Docker et la règle reposée, d'après le journal
+(`docker logs waggle-$INSTANCE-firewall-1`).
+
+Le retrait du voisin :
 
 ```bash
-iptables -D DOCKER-USER -m conntrack --ctorigdst $VPN --ctdir ORIGINAL ! -i $WG -j DROP
-docker rm -f waggle-essai; ip netns del waggle-dehors; ip link del waggle-h 2>/dev/null
+ip netns del waggle-dehors; ip link del waggle-h 2>/dev/null
 ```
-
-Le redémarrage du serveur se constate à part, règle posée. Sans rien pour la reposer, elle
-disparaît. C'est ce que l'installation de waggle devra faire.
 
 ## 2. Le port 53 libre sur l'adresse du VPN
 
-**Ce qu'il établit.** Le DNS du VPN peut s'y publier (décision 6).
+**Ce qu'il établit.** Le DNS du VPN peut s'y publier (ADR-0001, décision 6).
 
 Sur le serveur : `ss -lunpt | grep ':53 '`. Il est attendu que seul `systemd-resolved` y
 écoute, sur `127.0.0.53` et `127.0.0.54`. Un service à l'écoute sur `0.0.0.0:53` empêcherait
-la publication.
+la publication, et `waggle up` le dirait.
+
+Puis, depuis le Mac, tunnel actif : `dig +short @10.8.0.1 <dossier>.<domaine du DNS>`. Attendu :
+`10.8.0.1`.
 
 ## 3. Un conteneur de Docker Desktop joint l'adresse du serveur par le tunnel du Mac
 
 **Ce qu'il établit.** Le relais part du Traefik du Mac, un conteneur. Docker Desktop dit
-faire ressortir le trafic des conteneurs sur le Mac lui-même, VPN compris (décision 5).
+faire ressortir le trafic des conteneurs sur le Mac lui-même, VPN compris (ADR-0001,
+décision 5).
 
-Pendant l'essai 1, conteneur `waggle-essai` levé et règle posée, sur le Mac, tunnel actif :
+Sur le Mac, tunnel actif :
 
 ```bash
-docker run --rm alpine:3.20 wget -q -T 3 -O /dev/null -S http://10.8.0.1:18081/ 2>&1 | head -1
+docker run --rm alpine:3.20 wget -q -T 3 -O /dev/null -S http://10.8.0.1/ 2>&1 | head -1
 ```
 
-Attendu : `HTTP/1.1 200 OK`. Le paquet entre au serveur par `wg0`, comme celui du Mac.
+Attendu : `HTTP/1.1 404 Not Found`. Le Traefik du serveur répond : le paquet est entré par
+`wg0`.
 
 ## 4. Plusieurs tunnels WireGuard actifs à la fois sur un Mac
 
-**Ce qu'il établit.** Un poste peut relayer vers deux serveurs de deux VPN (décision 5).
-L'app WireGuard de macOS n'en active peut-être qu'un à la fois.
+**Ce qu'il établit.** Un poste peut relayer vers deux serveurs de deux VPN (ADR-0001,
+décision 5). L'app WireGuard de macOS n'en active peut-être qu'un à la fois.
 
 1. **Dans l'app**, deux tunnels vers deux serveurs : activer l'un, puis l'autre. Les deux
    restent-ils actifs ? Pour le voir : `ifconfig | grep -A3 '^utun'` et
@@ -112,21 +119,55 @@ L'app WireGuard de macOS n'en active peut-être qu'un à la fois.
 
 À noter : la voie qui marche. Les réglages de waggle et sa documentation la suivront.
 
-## 5. La confiance totale d'iOS envers une autorité en X.509 v1
+## 5. Un téléphone, Android et iOS, avec l'autorité de waggle
 
-**Ce qu'il établit.** Un téléphone peut ouvrir en HTTPS une stack d'un projet en TLS, par le
-DNS du VPN (décisions 6 et 8). L'autorité d'un projet existant est un certificat X.509 v1,
-sans `basicConstraints`.
+**Ce qu'il établit.** Un téléphone peut ouvrir en HTTPS une stack du serveur par le DNS du
+VPN (ADR-0001, décisions 6 et 8 ; ADR-0002, décision 2). L'autorité de waggle est en X.509 v3,
+`CA:TRUE` ; ses certificats durent 397 jours, en ECDSA P-256.
 
-1. Lire la version de l'autorité sur le Mac :
-   `openssl x509 -in <autorité>.pem -noout -text | grep -E 'Version|CA:'`.
-2. L'envoyer à l'iPhone (AirDrop ou courriel), puis l'installer : Réglages → Profil
-   téléchargé.
-3. Réglages → Général → Informations → Réglages de confiance des certificats : l'autorité
-   y figure-t-elle, avec son interrupteur ? L'activer.
-4. Le tunnel actif, avec `DNS = 10.8.0.1` dans sa configuration, ouvrir
-   `https://<dossier>.<domaine de dev>` dans Safari. Attendu : la page, sans avertissement.
+L'autorité de l'instance s'obtient par `waggle ca team > ca.crt`, sur le
+serveur.
 
-Si l'autorité n'apparaît pas à l'étape 3, iOS refuse la confiance totale à une autorité v1.
-Il faudra au projet une autorité en X.509 v3 (`basicConstraints = CA:TRUE`) : c'est une
-décision du projet, pas de waggle.
+**Android** (le Pixel) :
+1. Le tunnel de l'app WireGuard porte `DNS = 10.8.0.1`. Ouvrir
+   `https://<dossier>.<domaine du DNS>` dans Chrome, avant d'installer l'autorité. Attendu :
+   un avertissement de certificat. Le nom résout donc, par le DNS du tunnel.
+2. Installer l'autorité : Paramètres → Sécurité et confidentialité → Plus de paramètres de
+   sécurité → Chiffrement et identifiants → Installer un certificat → Certificat CA. À noter :
+   le chemin exact sur le Pixel.
+3. Rouvrir la page dans Chrome. Attendu : la page, sans avertissement.
+4. Le DNS privé : le régler sur un fournisseur (`dns.google`), puis rouvrir la page. Attendu :
+   elle ne s'ouvre plus. Ce réglage contournerait le DNS du tunnel, et le README le dit. Le
+   remettre en « Automatique », et constater que la page revient.
+5. Facultatif : Firefox, avec « Utiliser les certificats d'autorité tiers » activé.
+
+**iOS** :
+1. Envoyer `ca.crt` à l'iPhone (AirDrop ou courriel), puis l'installer : Réglages →
+   Profil téléchargé.
+2. Réglages → Général → Informations → Réglages de confiance des certificats : activer
+   l'autorité.
+3. Le tunnel actif, avec `DNS = 10.8.0.1`, ouvrir `https://<dossier>.<domaine du DNS>` dans
+   Safari. Attendu : la page, sans avertissement.
+
+**Un projet resté en passage** présente son propre certificat, signé par l'autorité du
+projet. Si celle-ci est en X.509 v1, sans `basicConstraints`, refaire les étapes avec elle :
+- Android pourrait refuser de l'installer comme autorité ;
+- iOS pourrait refuser de la proposer à la confiance totale.
+
+Il faudrait alors au projet une autorité en v3. C'est une décision du projet, pas de waggle.
+
+## 6. Sur un serveur, une stack qui joint sa propre URL
+
+**Ce qu'il établit.** C'est le coût que l'ADR-0002 laisse ouvert. Les e2e d'une stack visent
+sa vraie URL. Sur un serveur, cette URL est l'adresse du VPN, et la règle de pare-feu refuse
+ce qui vient des ponts de Docker.
+
+Sur le serveur, waggle servant `<nom>` en HTTPS :
+
+```bash
+docker run --rm --add-host <nom>:10.8.0.1 alpine:3.20 wget -q -T 3 -O /dev/null -S --no-check-certificate https://<nom>/ 2>&1 | head -1
+```
+
+Attendu avec la règle actuelle : rien, au bout de trois secondes. C'est le constat qui
+décidera du prochain incrément : une exception pour les ponts de Docker, ou le client de la
+stack branché sur le réseau de waggle.
