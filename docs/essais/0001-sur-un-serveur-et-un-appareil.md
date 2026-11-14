@@ -171,3 +171,35 @@ docker run --rm --add-host <nom>:10.8.0.1 alpine:3.20 wget -q -T 3 -O /dev/null 
 Attendu avec la règle actuelle : rien, au bout de trois secondes. C'est le constat qui
 décidera du prochain incrément : une exception pour les ponts de Docker, ou le client de la
 stack branché sur le réseau de waggle.
+
+## 7. Un agent du serveur joint ses stacks par la boucle locale
+
+**Ce qu'il établit.** Le serveur teste ses propres projets sous leurs vraies URL (ADR-0003,
+décision 2) : les agents qui y travaillent ouvrent une stack comme on le ferait du Mac.
+
+Sur le serveur, l'instance `team` avec `loopback: true`, et une stack levée :
+
+```bash
+docker version --format '{{.Server.Version}}'
+```
+
+Attendu : 28 ou plus. C'est à partir de là que Docker refuse, dans sa table `raw`, ce qui vise
+`127.0.0.1` sans entrer par `lo`. `sudo iptables -t raw -S | grep 127.0.0.1` montre une règle
+par port publié.
+
+Puis, toujours sur le serveur :
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://<dossier>.<domaine>/
+```
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://admin.<dossier>.localhost/
+```
+
+Attendu : la réponse de la stack, sans `--resolve` ni `/etc/hosts`. Le DNS public de
+`<domaine>` répond `127.0.0.1`, et `curl` envoie `*.localhost` à la boucle locale. En passage
+TLS, `curl` doit faire confiance à l'autorité du projet ; en HTTPS terminé par waggle, à celle
+de l'instance (`waggle ca team`).
+
+Puis Playwright, ou le navigateur qu'un agent pilote, sur la même URL.

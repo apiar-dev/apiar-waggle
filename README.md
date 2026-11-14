@@ -9,7 +9,9 @@ fleur : waggle indique au navigateur le chemin vers chaque stack.
 Les décisions sont dans [`docs/adr/`](docs/adr/) :
 - [ADR-0001](docs/adr/0001-waggle-le-routage-de-dev-d-une-machine.md), une instance par machine, jamais sur internet ;
 - [ADR-0002](docs/adr/0002-le-modele-upsun-des-routes-declarees-un-tls-termine-par-waggle.md), des routes déclarées par le
-  projet, un TLS terminé par waggle.
+  projet, un TLS terminé par waggle ;
+- [ADR-0003](docs/adr/0003-waggle-sur-chaque-machine-qui-ouvre-ou-teste-une-url.md), waggle sur chaque machine qui ouvre ou
+  teste une URL : en local, sur un serveur, ou les deux.
 
 Le plan de cet incrément : [`docs/plans/increment-1.md`](docs/plans/increment-1.md).
 
@@ -29,8 +31,11 @@ Le script, [`install.sh`](install.sh) :
    fichier du shell, sans y toucher lui-même ;
 4. sur un Mac, écrit la configuration du poste s'il n'y en a pas, lève l'instance (`waggle up`) et approuve son autorité
    dans le trousseau. macOS demande alors le mot de passe de la session, une seule fois ;
-5. sur Linux, s'arrête à la configuration s'il n'y en a pas : celle d'un serveur s'écrit à la main (§ « Sur un
-   serveur »). Une fois qu'elle est écrite, relancer le script lève les instances.
+5. sur Linux, écrit la configuration que la machine dit d'elle-même, s'il n'y en a pas, puis lève l'instance :
+   - une interface WireGuard : l'instance de ce VPN, sur son adresse, qui sert aussi la boucle locale de la machine à ses
+     propres agents (`loopback: true`) ;
+   - aucune : la boucle locale seule ;
+   - plusieurs : le script s'arrête, et la configuration s'écrit à la main, une instance par VPN (§ « Sur un serveur »).
 
 **Mettre à jour, c'est relancer la même commande.**
 - Le script amène le clone à la dernière version de `main`, puis reconstruit l'image.
@@ -66,6 +71,42 @@ dépôt (§ « Développer waggle »).
 
 Le journal du contrôleur dit chaque route servie, retirée ou refusée : `docker logs -f waggle-workstation-controller-1`.
 
+## Trois façons de travailler
+
+Le navigateur envoie toujours un nom de dev au `127.0.0.1` de sa machine : le DNS public le dit pour `*.dev.example.com`, et
+`*.localhost` n'est jamais demandé. waggle tourne donc sur chaque machine qui ouvre ou teste une URL. Il sert les stacks de
+cette machine, et relaie au serveur ce qu'il ne sert pas ([ADR-0003](docs/adr/0003-waggle-sur-chaque-machine-qui-ouvre-ou-teste-une-url.md)).
+
+| | Le Mac | Le serveur |
+| --- | --- | --- |
+| 1. Tout en local | waggle, sans relais | rien |
+| 2. Parfois en local, parfois sur le serveur | waggle, avec un relais vers le serveur : il sert ses stacks, et passe le reste | waggle, `loopback: true` |
+| 3. Tout sur le serveur | waggle, avec le même relais, sans aucune stack : il ne fait que passer | waggle, `loopback: true` |
+
+- **Les URL sont les mêmes partout**, quelle que soit la machine de la stack. Si un nom existe des deux côtés, le Mac garde
+  le sien.
+- **La façon de créer le worktree n'y change rien** : un outil, un agent, ou un humain connecté au serveur. waggle lit
+  les étiquettes des conteneurs.
+- **Le serveur teste ses propres stacks** : `loopback: true` lui fait servir les mêmes URL sur sa boucle locale, à ses
+  agents (`curl`, Playwright, un navigateur).
+- **Le relais du Mac**, pour les cas 2 et 3, s'ajoute à son instance. Un domaine par ligne, dont le schéma dit le mode, le
+  même que celui des routes du projet :
+
+  ```yaml
+  instances:
+    workstation:
+      address: 127.0.0.1
+      ports: [3000]
+      relays:
+        - to: 10.8.0.1              # the server's WireGuard address
+          domains:
+            - tls://dev.example.com # a passthrough domain
+            - http://localhost      # .localhost names
+  ```
+
+- **Un appareil sans waggle**, un téléphone ou un Mac sans Docker, passe par le DNS du VPN (§ « Un téléphone ») : il
+  n'ouvre que de vrais domaines.
+
 ## Sur un poste
 
 - Les ports 80 et 443 de `127.0.0.1` doivent être libres : arrêter d'abord le proxy « du poste » d'un projet qui n'a pas
@@ -83,8 +124,13 @@ Le journal du contrôleur dit chaque route servie, retirée ou refusée : `docke
   refuse toute adresse qui n'est ni la boucle locale ni celle d'une interface WireGuard.
 - Une instance par VPN, chacune avec la liste de ses projets (`projects`). Deux VPN ne voient jamais les stacks l'un de
   l'autre.
-- La configuration s'écrit à la main : copier [`config.example.yaml`](config.example.yaml) dans
-  `~/.config/waggle/config.yaml`, et y décrire une instance par VPN. Puis relancer le script, ou `waggle up`.
+- La configuration : avec une seule interface WireGuard, le script l'écrit. Avec plusieurs, elle s'écrit à la main :
+  copier [`config.example.yaml`](config.example.yaml) dans `~/.config/waggle/config.yaml`, et y décrire une instance par
+  VPN. Puis relancer le script, ou `waggle up`.
+- `loopback: true` : l'instance publie aussi ses points d'entrée sur `127.0.0.1`, pour les agents du serveur. Une seule
+  instance par machine sert sa boucle locale. Le port du relais reste sur l'adresse du VPN. Une adresse de boucle ne
+  s'ouvre pas au voisin : Docker refuse, dans sa table `raw`, ce qui vise `127.0.0.1` sans entrer par `lo`
+  (`make firewall` le vérifie).
 - Le pare-feu se pose seul.
   - Le service `firewall` de chaque instance pose la règle qui ferme l'adresse du VPN à tout ce qui n'entre pas par son
     interface :
@@ -100,6 +146,7 @@ Le journal du contrôleur dit chaque route servie, retirée ou refusée : `docke
 | Clé | Ce qu'elle règle |
 | --- | --- |
 | `instances.<nom>.address` | `127.0.0.1` sur un poste ; l'adresse WireGuard d'un VPN sur un serveur |
+| `loopback` | sur un serveur : servir aussi la boucle locale, aux agents de la machine. Une instance par machine au plus |
 | `ports` | les ports historiques d'un projet existant, en TLS, en plus de 80 et 443 |
 | `projects` | les projets que l'instance lit (`waggle.project`) ; sans liste, tous, s'il n'y a qu'une instance |
 | `relays` | d'un poste vers un serveur : `to`, l'adresse du serveur ; `domains`, une URL par domaine, dont le schéma dit le mode |
@@ -192,7 +239,7 @@ Docker : il n'y a pas Go à installer.
 | --- | --- |
 | `make check` | le format, `go vet` et les tests unitaires |
 | `make integration` | deux vraies instances, l'une poste et l'autre serveur, sur des ports décalés, avec des stacks jetables. Tout est retiré à la fin ; `WAGGLE_TEST_KEEP=1` garde tout levé, pour lire |
-| `make firewall` | la commande `waggle firewall`, dans un Docker-in-Docker isolé : un membre du tunnel, un voisin, un membre d'un autre VPN |
+| `make firewall` | dans un Docker-in-Docker isolé : la commande `waggle firewall` face à un membre du tunnel, un voisin et un membre d'un autre VPN ; puis un port publié sur `127.0.0.1`, qu'un voisin ne joint pas |
 | `make shellcheck` | les scripts |
 
 Le code :
