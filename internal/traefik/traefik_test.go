@@ -2,6 +2,7 @@ package traefik
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -81,13 +82,54 @@ tls://{stack}.legacy.example 8443
 	}
 }
 
+// An exact host goes before a wildcard of the same stack, although a HostRegexp is the longer rule; then the longest rule,
+// as Traefik does: a longer path, a deeper wildcard. Every stack route stays above the relays, at -1 and -2.
+func TestPriority(t *testing.T) {
+	inst := &config.Instance{Name: "workstation"}
+	rs := served(t, `
+http://admin.{stack}.localhost/ 5173
+http://*.{stack}.localhost/ 5174
+https://{stack}.test.example/ 8080
+https://{stack}.test.example/api 9000
+https://*.{stack}.test.example/ 8080
+https://*.x.{stack}.test.example/ 8080
+tls://a.{stack}.legacy.example 8443
+tls://*.{stack}.legacy.example 8443
+`, "a", "/a-front-1", "172.30.0.5")
+	c := Routes(inst, rs)
+	p := func(kind string, n int) float64 {
+		v, _ := at(t, c, kind, "routers", fmt.Sprintf("a-front-1-%d", n), "priority").(float64)
+		if v <= 0 {
+			t.Errorf("route %d: priority %v, not above the relays", n, v)
+		}
+		return v
+	}
+	for _, c := range []struct {
+		what          string
+		kind          string
+		first, second int
+	}{
+		{"an exact host before a wildcard, on p80", "http", 1, 2},
+		{"an exact host before a wildcard, in HTTPS", "http", 3, 5},
+		{"a path before the root", "http", 4, 3},
+		{"a deeper wildcard before a wildcard", "http", 6, 5},
+		{"an exact SNI before a wildcard", "tcp", 7, 8},
+	} {
+		if p(c.kind, c.first) <= p(c.kind, c.second) {
+			t.Errorf("%s: %v, then %v", c.what, p(c.kind, c.first), p(c.kind, c.second))
+		}
+	}
+}
+
 func TestServerRoutes(t *testing.T) {
 	inst := &config.Instance{Name: "team", RelayListener: &config.RelayListener{Port: 8080, TrustedIPs: []string{"10.8.0.0/24"}}}
 	c := Routes(inst, served(t, "https://{stack}.test.example:443/ 8080", "r", "r-app-1", "172.30.0.9"))
 	got := at(t, c, "http", "routers", "r-app-1-1-relay")
+	rule := "(Host(`r.test.example`)) && Header(`X-Waggle-Port`, `443`)"
 	want := map[string]any{
 		"entryPoints": []any{"relay"},
-		"rule":        "(Host(`r.test.example`)) && Header(`X-Waggle-Port`, `443`)",
+		"rule":        rule,
+		"priority":    float64(exactHost + len(rule)),
 		"service":     "r-app-1-1",
 	}
 	if !reflect.DeepEqual(got, want) {

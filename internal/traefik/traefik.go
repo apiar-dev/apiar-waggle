@@ -49,24 +49,29 @@ func Routes(inst *config.Instance, rs []ServedRoute) section {
 		switch r.Mode {
 		case routes.HTTPS:
 			rule := httpRule(r.Route)
-			httpR[name] = section{"entryPoints": []string{EntryPoint(r.Port)}, "rule": rule, "tls": section{}, "service": name}
+			httpR[name] = section{
+				"entryPoints": []string{EntryPoint(r.Port)}, "rule": rule, "priority": priority(r.Route, rule),
+				"tls": section{}, "service": name,
+			}
 			if inst.RelayListener != nil {
 				// A workstation's relay arrives over HTTP, and names in PortHeader the entry point the request reached on its
 				// side: a route on port 3000 only answers a request that came in on port 3000
+				relayed := fmt.Sprintf("(%s) && Header(`%s`, `%d`)", rule, PortHeader, r.Port)
 				httpR[name+"-relay"] = section{
-					"entryPoints": []string{"relay"},
-					"rule":        fmt.Sprintf("(%s) && Header(`%s`, `%d`)", rule, PortHeader, r.Port),
-					"service":     name,
+					"entryPoints": []string{"relay"}, "rule": relayed, "priority": priority(r.Route, relayed), "service": name,
 				}
 			}
 			httpS[name] = httpService(fmt.Sprintf("http://%s:%d", r.IP, r.Target), false)
 		case routes.HTTP:
-			httpR[name] = section{"entryPoints": []string{"p80"}, "rule": httpRule(r.Route), "service": name}
+			rule := httpRule(r.Route)
+			httpR[name] = section{"entryPoints": []string{"p80"}, "rule": rule, "priority": priority(r.Route, rule), "service": name}
 			httpS[name] = httpService(fmt.Sprintf("http://%s:%d", r.IP, r.Target), false)
 		case routes.TLS:
+			rule := sniRule(r.Route)
 			tcpR[name] = section{
 				"entryPoints": []string{EntryPoint(r.Port)},
-				"rule":        sniRule(r.Route),
+				"rule":        rule,
+				"priority":    priority(r.Route, rule),
 				"tls":         section{"passthrough": true},
 				"service":     name,
 			}
@@ -197,6 +202,19 @@ func Sanitize(s string) string {
 }
 
 var reNotName = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// exactHost lifts the routes of an exact host above every wildcard: no rule is that long.
+const exactHost = 1 << 16
+
+// priority orders a stack's routes. Without it, Traefik orders them by the length of their rule, and a wildcard's
+// HostRegexp, longer than an exact Host, would take admin.<stack> from the route that names it. An exact host goes first;
+// then, as Traefik does, the longest rule: a longer path, a deeper wildcard. The relays stay below, at -1 and -2.
+func priority(r routes.Route, rule string) int {
+	if r.Wildcard() {
+		return len(rule)
+	}
+	return exactHost + len(rule)
+}
 
 func hostRule(r routes.Route) string {
 	if r.Wildcard() {

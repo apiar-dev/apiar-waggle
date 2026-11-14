@@ -169,6 +169,8 @@ func setup() error {
 		"w-a": {
 			"front": "https://{stack}.example.test/ 8080\nhttps://{stack}.example.test:3000/ 8081\nhttps://api.{stack}.example.test/ 8080\nhttp://admin.{stack}.localhost/ 8080",
 			"api":   "https://{stack}.example.test/api 8080",
+			// Wildcards next to front's exact hosts: whatever the rules' lengths, an exact host goes first
+			"site": "https://*.{stack}.example.test/ 8080\nhttp://*.{stack}.localhost/ 8080",
 		},
 		"w-b": {"front": "https://{stack}.example.test/ 8080\nhttps://intruder.example.test/ 8080"},
 		"w-t": {"front": "tls://{stack}.legacy.test 8443"},
@@ -192,6 +194,7 @@ func setup() error {
 		answer string
 	}{
 		{stack("w-a") + ".example.test", 443 + workstationOffset, workstationCA, stack("w-a") + " front"},
+		{"www." + stack("w-a") + ".example.test", 443 + workstationOffset, workstationCA, stack("w-a") + " site"},
 		{stack("w-b") + ".example.test", 443 + workstationOffset, workstationCA, stack("w-b") + " front"},
 		{stack("w-t") + ".legacy.test", 443 + workstationOffset, projectCA, stack("w-t") + " front"},
 		{stack("s-r") + ".example.test", 443 + serverOffset, serverCA, stack("s-r") + " front"},
@@ -381,6 +384,26 @@ func TestOneHTTP2ConnectionForSeveralStacks(t *testing.T) {
 func TestHTTPOnP80(t *testing.T) {
 	status, body, _, err := get("http", "admin."+stack("w-a")+".localhost", 80+workstationOffset, "/", nil)
 	expect(t, "http on p80", status, body, err, stack("w-a")+" front 8080")
+}
+
+// An exact host goes before a wildcard of the same stack, whatever the lengths of their rules: admin.<stack> stays the
+// admin's, and every other name below the stack, a brand's domain of several labels included, is the wildcard's.
+func TestExactHostBeforeWildcard(t *testing.T) {
+	a := stack("w-a")
+	for _, c := range []struct {
+		scheme, name string
+		port         int
+		pool         *x509.CertPool
+		answer       string
+	}{
+		{"http", "admin." + a + ".localhost", 80 + workstationOffset, nil, a + " front 8080"},
+		{"http", "www.brand.example." + a + ".localhost", 80 + workstationOffset, nil, a + " site 8080"},
+		{"https", "api." + a + ".example.test", 443 + workstationOffset, workstationCA, a + " front 8080"},
+		{"https", "www." + a + ".example.test", 443 + workstationOffset, workstationCA, a + " site 8080"},
+	} {
+		status, body, _, err := get(c.scheme, c.name, c.port, "/", c.pool)
+		expect(t, c.name, status, body, err, c.answer)
+	}
 }
 
 func TestPassthrough(t *testing.T) {
