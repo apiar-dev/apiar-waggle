@@ -137,8 +137,9 @@ services:
   | `http://` | en clair sur le port 80, par exemple `http://admin.{stack}.localhost/` |
   | `tls://` | le passage : la stack termine son TLS, et waggle route par le SNI |
 
-- **Un hôte joker**, `https://*.{stack}.dev.example.com/`, sert une famille d'hôtes.
-- **Un chemin**, `/api`, prend `/api` et ce qui est dessous, mais pas `/apiv2`.
+- **Un hôte joker**, `https://*.{stack}.dev.example.com/`, sert une famille d'hôtes, y compris les noms à plusieurs
+  labels sous la stack. Un nom exact de la même stack passe avant lui : `admin.{stack}…` reste à la route qui le nomme.
+- **Un chemin**, `/api`, prend `/api` et ce qui est dessous, mais pas `/apiv2`. Le plus long passe avant les autres.
 - **Les refus.** Une route dont l'hôte ne porte pas `{stack}` est refusée : une stack ne prend pas le nom d'une autre. Une
   route disputée reste à la stack la plus ancienne.
 - **Un domaine est terminé ou en passage, jamais les deux** (ADR-0002, décision 4).
