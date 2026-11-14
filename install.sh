@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs waggle on this machine, macOS or Linux, or upgrades it: run it again, it brings the clone to the wanted
-# version, rebuilds the image and restarts what changed (README).
+# version, rebuilds the image and restarts what changed (README, ADR-0003).
 #
 #   gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
 #
@@ -96,6 +96,47 @@ path_hint() {
 	printf '\n  %s\n\n' "$line"
 }
 
+# The IPv4 addresses of this machine's WireGuard interfaces, one per line
+wireguard_addresses() {
+	for dev in /sys/class/net/*; do
+		grep -qsx 'DEVTYPE=wireguard' "$dev/uevent" || continue
+		ip -4 -o addr show dev "${dev##*/}" 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }'
+	done
+}
+
+# linux_config: the configuration a Linux machine gets without asking (ADR-0003, decision 6). With one WireGuard
+# interface, the instance of that VPN, which also serves the machine's own agents on loopback; with none, loopback only.
+# With several, nothing: one instance per VPN, written by hand.
+linux_config() {
+	addresses=$(wireguard_addresses)
+	case "$(printf '%s' "$addresses" | grep -c .)" in
+	0)
+		cat <<EOF
+# Written by install.sh: no WireGuard interface, so this machine serves its own browsers and agents, on loopback (README).
+instances:
+  local:
+    address: 127.0.0.1
+    # Legacy ports of the projects, on top of 80 and 443
+    # ports: [3000]
+EOF
+		;;
+	1)
+		cat <<EOF
+# Written by install.sh: this machine's VPN, on its WireGuard address, and its own loopback, for its agents (README).
+instances:
+  vpn:
+    address: $addresses
+    loopback: true
+    # Legacy ports of the projects, on top of 80 and 443
+    # ports: [3000]
+    # The domains the VPN DNS resolves to this machine, for phones
+    # dns: [dev.example.com]
+EOF
+		;;
+	*) return 1 ;;
+	esac
+}
+
 main() {
 	os=$(uname -s)
 	ref=${WAGGLE_REF:-main}
@@ -107,19 +148,25 @@ main() {
 	fetch
 	link
 
-	# The configuration: a Mac is a workstation, and the example's instance is all it needs. A Linux machine may be a
-	# server, whose instances depend on its VPNs: that one is written by hand.
+	# The configuration, when there is none: a Mac is a workstation, and the example's instance is all it needs. A Linux
+	# machine gets the one its WireGuard interfaces tell; with several VPNs, it is written by hand.
 	if [ ! -f "$config" ]; then
-		if [ "$os" != Darwin ]; then
-			say "waggle is installed, with no configuration yet. Copy the example and adapt it:"
-			printf '\n  mkdir -p %s && cp %s %s\n\n' "$(dirname -- "$config")" "$home/config.example.yaml" "$config"
-			say "then run this again, or waggle up (the README describes a server's configuration)."
+		mkdir -p "$(dirname -- "$config")"
+		if [ "$os" = Darwin ]; then
+			cp "$home/config.example.yaml" "$config"
+			say "configuration written to $config: one workstation instance, on 127.0.0.1"
+		elif linux_config >"$config.tmp"; then
+			mv "$config.tmp" "$config"
+			say "configuration written to $config:"
+			grep -v '^ *#' "$config" | sed 's/^/    /'
+		else
+			rm -f "$config.tmp"
+			say "this machine has several WireGuard interfaces: write its configuration by hand, one instance per VPN:"
+			printf '\n  cp %s %s\n\n' "$home/config.example.yaml" "$config"
+			say "then run this again (the README describes a server's configuration)."
 			path_hint
 			return 0
 		fi
-		mkdir -p "$(dirname -- "$config")"
-		cp "$home/config.example.yaml" "$config"
-		say "configuration written to $config: one workstation instance, on 127.0.0.1"
 	fi
 
 	say "starting the instances; the first build of waggle's image takes a minute or two"
