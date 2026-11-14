@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -104,8 +105,9 @@ func TestRebuild(t *testing.T) {
 	if err := c.Rebuild(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(f.connected, ",") != "1,2" {
-		t.Errorf("only the services of its projects are connected: %v", f.connected)
+	// The controller connects them in no particular order
+	if connected := slices.Sorted(slices.Values(f.connected)); strings.Join(connected, ",") != "1,2" {
+		t.Errorf("only the services of its projects are connected: %v", connected)
 	}
 	r := routers(t, c)
 	if len(r) != 3 {
