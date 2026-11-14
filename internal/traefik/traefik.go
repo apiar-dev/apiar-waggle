@@ -1,5 +1,6 @@
-// Package traefik traduit les routes des stacks et les relais d'une instance en configuration dynamique de Traefik, que le
-// fournisseur de fichiers relit (ADR-0002, décisions 1 à 3). Tout est écrit en JSON, que le YAML de Traefik lit tel quel.
+// Package traefik translates the routes of the stacks and the relays of an instance into Traefik dynamic configuration,
+// which the file provider reloads (ADR-0002, decisions 1 to 3). Everything is written as JSON, which Traefik's YAML
+// reader takes as is.
 package traefik
 
 import (
@@ -8,241 +9,241 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/apiar-dev/apiar-waggle/internal/reglages"
+	"github.com/apiar-dev/apiar-waggle/internal/config"
 	"github.com/apiar-dev/apiar-waggle/internal/routes"
 )
 
-// DelaiRelais : le délai de connexion d'un relais. VPN coupé, un nom relayé échoue en deux secondes, et non en trente
-// (ADR-0001, décision 5).
-const DelaiRelais = "2s"
+// RelayDialTimeout is the dial timeout of a relay. With the VPN down, a relayed name fails in two seconds rather than
+// thirty (ADR-0001, decision 5).
+const RelayDialTimeout = "2s"
 
-// EnTetePort : l'en-tête où le relais d'un poste nomme le port d'entrée d'une requête. Le point d'entrée `relais` d'un
-// serveur n'est ouvert qu'au VPN.
-const EnTetePort = "X-Waggle-Port"
+// PortHeader is where a workstation's relay names the entry port of a request. A server's `relay` entry point is only
+// open to the VPN.
+const PortHeader = "X-Waggle-Port"
 
-// RouteServie : une route, et le service qui la sert sur le réseau de l'instance.
-type RouteServie struct {
+// ServedRoute is a route, and the service that serves it on the instance network.
+type ServedRoute struct {
 	routes.Route
-	Conteneur string
+	Container string
 	IP        string
 }
 
-// Certificat : les fichiers d'un certificat, tels que Traefik les lit.
-type Certificat struct {
-	Cert string
-	Cle  string
+// Certificate is a certificate's files, as Traefik reads them.
+type Certificate struct {
+	CertFile string
+	KeyFile  string
 }
 
 type section = map[string]any
 
-// PointEntree : le nom du point d'entrée d'un port, p<port>.
-func PointEntree(port int) string { return fmt.Sprintf("p%d", port) }
+// EntryPoint is the name of a port's entry point, p<port>.
+func EntryPoint(port int) string { return fmt.Sprintf("p%d", port) }
 
-// Routes : les routeurs et les services des stacks.
-func Routes(inst *reglages.Instance, rs []RouteServie) section {
+// Routes are the routers and services of the stacks.
+func Routes(inst *config.Instance, rs []ServedRoute) section {
 	httpR, httpS, tcpR, tcpS := section{}, section{}, section{}, section{}
-	rang := map[string]int{}
+	count := map[string]int{}
 	for _, r := range rs {
-		rang[r.Conteneur]++
-		nom := fmt.Sprintf("%s-%d", Nettoyer(r.Conteneur), rang[r.Conteneur])
+		count[r.Container]++
+		name := fmt.Sprintf("%s-%d", Sanitize(r.Container), count[r.Container])
 		switch r.Mode {
 		case routes.HTTPS:
-			regle := regleHTTP(r.Route)
-			httpR[nom] = section{"entryPoints": []string{PointEntree(r.Port)}, "rule": regle, "tls": section{}, "service": nom}
-			if inst.RelaisEntrant != nil {
-				// Le relais d'un poste arrive en HTTP, et nomme dans EnTetePort le point d'entrée où la requête est arrivée
-				// chez lui : une route du port 3000 n'y répond qu'à une requête venue du port 3000
-				httpR[nom+"-relais"] = section{
-					"entryPoints": []string{"relais"},
-					"rule":        fmt.Sprintf("(%s) && Header(`%s`, `%d`)", regle, EnTetePort, r.Port),
-					"service":     nom,
+			rule := httpRule(r.Route)
+			httpR[name] = section{"entryPoints": []string{EntryPoint(r.Port)}, "rule": rule, "tls": section{}, "service": name}
+			if inst.RelayListener != nil {
+				// A workstation's relay arrives over HTTP, and names in PortHeader the entry point the request reached on its
+				// side: a route on port 3000 only answers a request that came in on port 3000
+				httpR[name+"-relay"] = section{
+					"entryPoints": []string{"relay"},
+					"rule":        fmt.Sprintf("(%s) && Header(`%s`, `%d`)", rule, PortHeader, r.Port),
+					"service":     name,
 				}
 			}
-			httpS[nom] = serviceHTTP(fmt.Sprintf("http://%s:%d", r.IP, r.Cible), false)
+			httpS[name] = httpService(fmt.Sprintf("http://%s:%d", r.IP, r.Target), false)
 		case routes.HTTP:
-			httpR[nom] = section{"entryPoints": []string{"p80"}, "rule": regleHTTP(r.Route), "service": nom}
-			httpS[nom] = serviceHTTP(fmt.Sprintf("http://%s:%d", r.IP, r.Cible), false)
+			httpR[name] = section{"entryPoints": []string{"p80"}, "rule": httpRule(r.Route), "service": name}
+			httpS[name] = httpService(fmt.Sprintf("http://%s:%d", r.IP, r.Target), false)
 		case routes.TLS:
-			tcpR[nom] = section{
-				"entryPoints": []string{PointEntree(r.Port)},
-				"rule":        regleSNI(r.Route),
+			tcpR[name] = section{
+				"entryPoints": []string{EntryPoint(r.Port)},
+				"rule":        sniRule(r.Route),
 				"tls":         section{"passthrough": true},
-				"service":     nom,
+				"service":     name,
 			}
-			tcpS[nom] = serviceTCP(fmt.Sprintf("%s:%d", r.IP, r.Cible), false)
+			tcpS[name] = tcpService(fmt.Sprintf("%s:%d", r.IP, r.Target), false)
 		}
 	}
-	return assembler(httpR, httpS, nil, tcpR, tcpS, false)
+	return assemble(httpR, httpS, nil, tcpR, tcpS, false)
 }
 
-// Relais : les routes de relais d'un poste, une par domaine, dans le mode du domaine, à priorité négative : toute route
-// d'une stack passe devant (ADR-0001, décision 5 ; ADR-0002, décision 3).
-func Relais(inst *reglages.Instance) section {
+// Relays are a workstation's relay routes, one per domain, in the domain's mode, with a negative priority: every stack
+// route goes first (ADR-0001, decision 5; ADR-0002, decision 3).
+func Relays(inst *config.Instance) section {
 	httpR, httpS, httpM, tcpR, tcpS := section{}, section{}, section{}, section{}, section{}
-	for i, rel := range inst.Relais {
+	for i, rel := range inst.Relays {
 		n := i + 1
-		for _, texte := range rel.Domaines {
-			d, err := reglages.LireDomaineRelaye(texte)
+		for _, text := range rel.Domains {
+			d, err := config.ParseRelayedDomain(text)
 			if err != nil {
-				continue // les réglages validés n'en ont pas
+				continue // validated configuration has none
 			}
-			base := fmt.Sprintf("relais-%d-%s", n, Nettoyer(d.Domaine))
+			base := fmt.Sprintf("relay-%d-%s", n, Sanitize(d.Domain))
 			switch d.Mode {
 			case "https":
-				// Terminé ici, relayé en HTTP au point d'entrée `relais` du serveur, requête par requête
-				service := fmt.Sprintf("relais-%d-https", n)
-				httpS[service] = serviceHTTP(fmt.Sprintf("http://%s:%d", rel.Vers, rel.PortRelais+rel.DecalagePorts), true)
-				for _, p := range inst.PortsTLS() {
-					// Le serveur retrouve le point d'entrée d'origine par cet en-tête, et non par X-Forwarded-Port, qui
-					// reprend le port de l'en-tête Host
-					marque := fmt.Sprintf("relais-port-p%d", p)
-					httpM[marque] = section{"headers": section{"customRequestHeaders": section{EnTetePort: fmt.Sprint(p)}}}
+				// Terminated here, relayed over HTTP to the server's `relay` entry point, request by request
+				service := fmt.Sprintf("relay-%d-https", n)
+				httpS[service] = httpService(fmt.Sprintf("http://%s:%d", rel.To, rel.RelayPort+rel.PortOffset), true)
+				for _, p := range inst.TLSPorts() {
+					// The server finds the original entry point through this header, not X-Forwarded-Port, which takes
+					// the port of the Host header
+					mark := fmt.Sprintf("relay-port-p%d", p)
+					httpM[mark] = section{"headers": section{"customRequestHeaders": section{PortHeader: fmt.Sprint(p)}}}
 					httpR[fmt.Sprintf("%s-https-p%d", base, p)] = section{
-						"entryPoints": []string{PointEntree(p)}, "rule": regleDomaine("HostRegexp", d.Domaine),
-						"priority": -1, "tls": section{}, "middlewares": []string{marque}, "service": service,
+						"entryPoints": []string{EntryPoint(p)}, "rule": domainRule("HostRegexp", d.Domain),
+						"priority": -1, "tls": section{}, "middlewares": []string{mark}, "service": service,
 					}
 				}
 			case "tls":
-				// En passage, relayé en TCP sur le même port du serveur ; jamais de fourre-tout HostSNI(`*`), qui ne reçoit
-				// plus rien à côté de routes HTTPS
-				for _, p := range inst.PortsTLS() {
-					service := fmt.Sprintf("relais-%d-tls-p%d", n, p)
-					tcpS[service] = serviceTCP(fmt.Sprintf("%s:%d", rel.Vers, p+rel.DecalagePorts), true)
+				// Passthrough, relayed over TCP to the same server port; never a HostSNI(`*`) catch-all, which receives
+				// nothing next to HTTPS routes
+				for _, p := range inst.TLSPorts() {
+					service := fmt.Sprintf("relay-%d-tls-p%d", n, p)
+					tcpS[service] = tcpService(fmt.Sprintf("%s:%d", rel.To, p+rel.PortOffset), true)
 					tcpR[fmt.Sprintf("%s-tls-p%d", base, p)] = section{
-						"entryPoints": []string{PointEntree(p)}, "rule": regleDomaine("HostSNIRegexp", d.Domaine),
+						"entryPoints": []string{EntryPoint(p)}, "rule": domainRule("HostSNIRegexp", d.Domain),
 						"priority": -1, "tls": section{"passthrough": true}, "service": service,
 					}
 				}
 			case "http":
-				service := fmt.Sprintf("relais-%d-http", n)
-				httpS[service] = serviceHTTP(fmt.Sprintf("http://%s:%d", rel.Vers, 80+rel.DecalagePorts), true)
-				regle, priorite := regleDomaine("HostRegexp", d.Domaine), -1
-				if d.Domaine == "*" {
-					regle, priorite = "PathPrefix(`/`)", -2
+				service := fmt.Sprintf("relay-%d-http", n)
+				httpS[service] = httpService(fmt.Sprintf("http://%s:%d", rel.To, 80+rel.PortOffset), true)
+				rule, priority := domainRule("HostRegexp", d.Domain), -1
+				if d.Domain == "*" {
+					rule, priority = "PathPrefix(`/`)", -2
 				}
-				httpR[base+"-http"] = section{"entryPoints": []string{"p80"}, "rule": regle, "priority": priorite, "service": service}
+				httpR[base+"-http"] = section{"entryPoints": []string{"p80"}, "rule": rule, "priority": priority, "service": service}
 			}
 		}
 	}
-	return assembler(httpR, httpS, httpM, tcpR, tcpS, len(inst.Relais) > 0)
+	return assemble(httpR, httpS, httpM, tcpR, tcpS, len(inst.Relays) > 0)
 }
 
-// TLS : les certificats que Traefik présente, choisis par le SNI.
-func TLS(certificats []Certificat) section {
-	if len(certificats) == 0 {
+// TLS lists the certificates Traefik presents, chosen by SNI.
+func TLS(certs []Certificate) section {
+	if len(certs) == 0 {
 		return section{}
 	}
-	var liste []any
-	for _, c := range certificats {
-		liste = append(liste, section{"certFile": c.Cert, "keyFile": c.Cle})
+	var list []any
+	for _, c := range certs {
+		list = append(list, section{"certFile": c.CertFile, "keyFile": c.KeyFile})
 	}
-	return section{"tls": section{"certificates": liste}}
+	return section{"tls": section{"certificates": list}}
 }
 
-// CertificatsVoulus : les certificats qu'il faut pour les routes HTTPS et les domaines relayés en HTTPS, par nom de fichier.
-//   - Un hôte à un label sous le domaine (<dossier>.<domaine>) : le joker du domaine, *.<domaine>.
-//   - Un hôte à plusieurs labels (api.<dossier>.<domaine>) : le certificat de la stack, qui couvre <dossier>.<domaine> et
-//     le parent de chacun de ses hôtes, en joker. C'est le choix d'Upsun, un certificat par environnement.
-//   - Un domaine d'un seul label (localhost) n'a pas de joker : le certificat de la stack nomme ses hôtes.
-func CertificatsVoulus(inst *reglages.Instance, rs []RouteServie) map[string][]string {
-	ensembles := map[string]map[string]bool{}
-	ajouter := func(fichier string, noms ...string) {
-		if ensembles[fichier] == nil {
-			ensembles[fichier] = map[string]bool{}
+// WantedCertificates are the certificates needed by HTTPS routes and by domains relayed over HTTPS, by file name.
+//   - A host one label under the domain (<stack>.<domain>): the domain's wildcard, *.<domain>.
+//   - A host with more labels (api.<stack>.<domain>): the stack's own certificate, which covers <stack>.<domain> and the
+//     parent of each of its hosts, as a wildcard. That is Upsun's choice, one certificate per environment.
+//   - A single-label domain (localhost) has no wildcard: the stack's certificate names its hosts.
+func WantedCertificates(inst *config.Instance, rs []ServedRoute) map[string][]string {
+	sets := map[string]map[string]bool{}
+	add := func(file string, names ...string) {
+		if sets[file] == nil {
+			sets[file] = map[string]bool{}
 		}
-		for _, n := range noms {
-			ensembles[fichier][n] = true
+		for _, n := range names {
+			sets[file][n] = true
 		}
 	}
 	for _, r := range rs {
 		if r.Mode != routes.HTTPS {
 			continue
 		}
-		pile := r.Dossier + "." + r.Domaine
+		stack := r.Stack + "." + r.Domain
 		switch {
-		case r.Prefixe == "" && strings.Contains(r.Domaine, "."):
-			ajouter("joker."+r.Domaine, "*."+r.Domaine, r.Domaine)
-		case r.Prefixe == "":
-			ajouter("pile."+pile, pile)
+		case r.Prefix == "" && strings.Contains(r.Domain, "."):
+			add("wildcard."+r.Domain, "*."+r.Domain, r.Domain)
+		case r.Prefix == "":
+			add("stack."+stack, stack)
 		default:
-			_, parent, _ := strings.Cut(r.Hote, ".")
-			ajouter("pile."+pile, pile, "*."+parent)
+			_, parent, _ := strings.Cut(r.Host, ".")
+			add("stack."+stack, stack, "*."+parent)
 		}
 	}
-	for _, rel := range inst.Relais {
-		for _, texte := range rel.Domaines {
-			if d, err := reglages.LireDomaineRelaye(texte); err == nil && d.Mode == "https" {
-				ajouter("joker."+d.Domaine, "*."+d.Domaine, d.Domaine)
+	for _, rel := range inst.Relays {
+		for _, text := range rel.Domains {
+			if d, err := config.ParseRelayedDomain(text); err == nil && d.Mode == "https" {
+				add("wildcard."+d.Domain, "*."+d.Domain, d.Domain)
 			}
 		}
 	}
-	voulus := map[string][]string{}
-	for fichier, noms := range ensembles {
-		var liste []string
-		for n := range noms {
-			liste = append(liste, n)
+	wanted := map[string][]string{}
+	for file, names := range sets {
+		var list []string
+		for n := range names {
+			list = append(list, n)
 		}
-		sort.Strings(liste)
-		voulus[fichier] = liste
+		sort.Strings(list)
+		wanted[file] = list
 	}
-	return voulus
+	return wanted
 }
 
-// Nettoyer rend un nom utilisable comme nom de routeur ou de fichier.
-func Nettoyer(s string) string {
+// Sanitize makes a name usable as a router or file name.
+func Sanitize(s string) string {
 	s = strings.ToLower(strings.TrimPrefix(s, "/"))
-	s = strings.ReplaceAll(s, "*", "joker")
-	return strings.Trim(reNonNom.ReplaceAllString(s, "-"), "-")
+	s = strings.ReplaceAll(s, "*", "wildcard")
+	return strings.Trim(reNotName.ReplaceAllString(s, "-"), "-")
 }
 
-var reNonNom = regexp.MustCompile(`[^a-z0-9-]+`)
+var reNotName = regexp.MustCompile(`[^a-z0-9-]+`)
 
-func regleHote(r routes.Route) string {
-	if r.Joker() {
-		return fmt.Sprintf("HostRegexp(`^.+\\.%s$`)", regexp.QuoteMeta(strings.TrimPrefix(r.Hote, "*.")))
+func hostRule(r routes.Route) string {
+	if r.Wildcard() {
+		return fmt.Sprintf("HostRegexp(`^.+\\.%s$`)", regexp.QuoteMeta(strings.TrimPrefix(r.Host, "*.")))
 	}
-	return fmt.Sprintf("Host(`%s`)", r.Hote)
+	return fmt.Sprintf("Host(`%s`)", r.Host)
 }
 
-func regleHTTP(r routes.Route) string {
-	regle := regleHote(r)
-	if r.Chemin != "/" {
-		// Path(`/api`) || PathPrefix(`/api/`) : /api et ce qui est dessous, mais pas /apiv2
-		regle += fmt.Sprintf(" && (Path(`%s`) || PathPrefix(`%s/`))", r.Chemin, r.Chemin)
+func httpRule(r routes.Route) string {
+	rule := hostRule(r)
+	if r.Path != "/" {
+		// Path(`/api`) || PathPrefix(`/api/`): /api and what is below it, but not /apiv2
+		rule += fmt.Sprintf(" && (Path(`%s`) || PathPrefix(`%s/`))", r.Path, r.Path)
 	}
-	return regle
+	return rule
 }
 
-func regleSNI(r routes.Route) string {
-	if r.Joker() {
-		return fmt.Sprintf("HostSNIRegexp(`^.+\\.%s$`)", regexp.QuoteMeta(strings.TrimPrefix(r.Hote, "*.")))
+func sniRule(r routes.Route) string {
+	if r.Wildcard() {
+		return fmt.Sprintf("HostSNIRegexp(`^.+\\.%s$`)", regexp.QuoteMeta(strings.TrimPrefix(r.Host, "*.")))
 	}
-	return fmt.Sprintf("HostSNI(`%s`)", r.Hote)
+	return fmt.Sprintf("HostSNI(`%s`)", r.Host)
 }
 
-// regleDomaine : un domaine et tout ce qui est dessous.
-func regleDomaine(matcher, domaine string) string {
-	return fmt.Sprintf("%s(`^(.+\\.)?%s$`)", matcher, regexp.QuoteMeta(domaine))
+// domainRule matches a domain and everything below it.
+func domainRule(matcher, domain string) string {
+	return fmt.Sprintf("%s(`^(.+\\.)?%s$`)", matcher, regexp.QuoteMeta(domain))
 }
 
-func serviceHTTP(url string, relais bool) section {
+func httpService(url string, relay bool) section {
 	lb := section{"passHostHeader": true, "servers": []any{section{"url": url}}}
-	if relais {
-		lb["serversTransport"] = "relais"
+	if relay {
+		lb["serversTransport"] = "relay"
 	}
 	return section{"loadBalancer": lb}
 }
 
-func serviceTCP(adresse string, relais bool) section {
-	lb := section{"servers": []any{section{"address": adresse}}}
-	if relais {
-		lb["serversTransport"] = "relais"
+func tcpService(address string, relay bool) section {
+	lb := section{"servers": []any{section{"address": address}}}
+	if relay {
+		lb["serversTransport"] = "relay"
 	}
 	return section{"loadBalancer": lb}
 }
 
-func assembler(httpR, httpS, httpM, tcpR, tcpS section, transports bool) section {
-	config := section{}
+func assemble(httpR, httpS, httpM, tcpR, tcpS section, transports bool) section {
+	cfg := section{}
 	if len(httpR) > 0 || transports {
 		h := section{}
 		if len(httpR) > 0 {
@@ -252,9 +253,9 @@ func assembler(httpR, httpS, httpM, tcpR, tcpS section, transports bool) section
 			h["middlewares"] = httpM
 		}
 		if transports {
-			h["serversTransports"] = section{"relais": section{"forwardingTimeouts": section{"dialTimeout": DelaiRelais}}}
+			h["serversTransports"] = section{"relay": section{"forwardingTimeouts": section{"dialTimeout": RelayDialTimeout}}}
 		}
-		config["http"] = h
+		cfg["http"] = h
 	}
 	if len(tcpR) > 0 || transports {
 		t := section{}
@@ -262,9 +263,9 @@ func assembler(httpR, httpS, httpM, tcpR, tcpS section, transports bool) section
 			t["routers"], t["services"] = tcpR, tcpS
 		}
 		if transports {
-			t["serversTransports"] = section{"relais": section{"dialTimeout": DelaiRelais}}
+			t["serversTransports"] = section{"relay": section{"dialTimeout": RelayDialTimeout}}
 		}
-		config["tcp"] = t
+		cfg["tcp"] = t
 	}
-	return config
+	return cfg
 }

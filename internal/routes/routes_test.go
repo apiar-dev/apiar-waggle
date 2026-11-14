@@ -5,82 +5,82 @@ import (
 	"testing"
 )
 
-func TestLire(t *testing.T) {
-	valeur := `
-https://{dossier}.dev.exemple.fr/          8080
-https://{dossier}.dev.exemple.fr:3000/     5173   # Vite, sur son port historique
-https://*.{dossier}.dev.exemple.fr/api/    8000
-http://admin.{dossier}.localhost/          5173
-tls://{dossier}.dev.ancien.fr:3000         3000
+func TestParse(t *testing.T) {
+	value := `
+https://{stack}.dev.example.com/          8080
+https://{stack}.dev.example.com:3000/     5173   # Vite, on its legacy port
+https://*.{stack}.dev.example.com/api/    8000
+http://admin.{stack}.localhost/           5173
+tls://{stack}.dev.legacy.com:3000         3000
 `
-	rs, errs := Lire(valeur, "go-1234", nil)
+	rs, errs := Parse(value, "go-1234", nil)
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
-	attendus := []struct {
-		mode                           Mode
-		hote, prefixe, domaine, chemin string
-		port, cible                    int
-		url                            string
+	want := []struct {
+		mode                       Mode
+		host, prefix, domain, path string
+		port, target               int
+		url                        string
 	}{
-		{HTTPS, "go-1234.dev.exemple.fr", "", "dev.exemple.fr", "/", 443, 8080, "https://go-1234.dev.exemple.fr/"},
-		{HTTPS, "go-1234.dev.exemple.fr", "", "dev.exemple.fr", "/", 3000, 5173, "https://go-1234.dev.exemple.fr:3000/"},
-		{HTTPS, "*.go-1234.dev.exemple.fr", "*", "dev.exemple.fr", "/api", 443, 8000, "https://*.go-1234.dev.exemple.fr/api"},
+		{HTTPS, "go-1234.dev.example.com", "", "dev.example.com", "/", 443, 8080, "https://go-1234.dev.example.com/"},
+		{HTTPS, "go-1234.dev.example.com", "", "dev.example.com", "/", 3000, 5173, "https://go-1234.dev.example.com:3000/"},
+		{HTTPS, "*.go-1234.dev.example.com", "*", "dev.example.com", "/api", 443, 8000, "https://*.go-1234.dev.example.com/api"},
 		{HTTP, "admin.go-1234.localhost", "admin", "localhost", "/", 80, 5173, "http://admin.go-1234.localhost/"},
-		{TLS, "go-1234.dev.ancien.fr", "", "dev.ancien.fr", "/", 3000, 3000, "tls://go-1234.dev.ancien.fr:3000"},
+		{TLS, "go-1234.dev.legacy.com", "", "dev.legacy.com", "/", 3000, 3000, "tls://go-1234.dev.legacy.com:3000"},
 	}
-	if len(rs) != len(attendus) {
-		t.Fatalf("%d routes lues : %+v", len(rs), rs)
+	if len(rs) != len(want) {
+		t.Fatalf("%d routes parsed: %+v", len(rs), rs)
 	}
-	for i, a := range attendus {
+	for i, w := range want {
 		r := rs[i]
-		if r.Mode != a.mode || r.Hote != a.hote || r.Prefixe != a.prefixe || r.Domaine != a.domaine || r.Chemin != a.chemin ||
-			r.Port != a.port || r.Cible != a.cible || r.URL() != a.url {
-			t.Errorf("route %d : %+v, attendu %+v", i, r, a)
+		if r.Mode != w.mode || r.Host != w.host || r.Prefix != w.prefix || r.Domain != w.domain || r.Path != w.path ||
+			r.Port != w.port || r.Target != w.target || r.URL() != w.url {
+			t.Errorf("route %d: %+v, want %+v", i, r, w)
 		}
 	}
-	if !rs[2].Joker() || rs[0].Joker() {
-		t.Error("seul un hôte en *. est une famille")
+	if !rs[2].Wildcard() || rs[0].Wildcard() {
+		t.Error("only a *. host is a family")
 	}
 }
 
-func TestPortExpose(t *testing.T) {
-	rs, errs := Lire("https://{dossier}.dev.exemple.fr/", "a", []int{8080})
-	if len(errs) > 0 || rs[0].Cible != 8080 {
-		t.Fatalf("le seul port exposé sert de cible : %+v %v", rs, errs)
+func TestExposedPort(t *testing.T) {
+	rs, errs := Parse("https://{stack}.dev.example.com/", "a", []int{8080})
+	if len(errs) > 0 || rs[0].Target != 8080 {
+		t.Fatalf("the only exposed port is the target: %+v %v", rs, errs)
 	}
-	_, errs = Lire("https://{dossier}.dev.exemple.fr/", "a", []int{80, 443})
+	_, errs = Parse("https://{stack}.dev.example.com/", "a", []int{80, 443})
 	if len(errs) != 1 {
-		t.Fatal("deux ports exposés : il faut nommer le sien")
+		t.Fatal("two exposed ports: the route must name its own")
 	}
 }
 
-func TestRefus(t *testing.T) {
-	cas := map[string]string{
-		"https://pirate.dev.exemple.fr/ 80":      "ne porte pas {dossier}",
-		"https://{dossier}.{dossier}.fr/ 80":     "qu'une fois",
-		"http://{dossier}.localhost:3000/ 80":    "port 80 seulement",
-		"tls://{dossier}.dev.ancien.fr/api 3000": "pas de chemin",
-		"ftp://{dossier}.dev.exemple.fr/ 21":     "n'est pas https",
-		"{dossier}.dev.exemple.fr 80":            "schéma",
-		"https://{dossier}/ 80":                  "domaine après",
-		"https://{dossier}.dev.exemple.fr/ 0":    "n'existe pas",
-		"https://a.*.{dossier}.fr/ 80":           "seul le premier",
+func TestRefusals(t *testing.T) {
+	cases := map[string]string{
+		"https://intruder.dev.example.com/ 80":  "does not carry {stack}",
+		"https://{stack}.{stack}.com/ 80":       "only once",
+		"http://{stack}.localhost:3000/ 80":     "port 80 only",
+		"tls://{stack}.dev.legacy.com/api 3000": "no path",
+		"ftp://{stack}.dev.example.com/ 21":     "is not https",
+		"{stack}.dev.example.com 80":            "scheme",
+		"https://{stack}/ 80":                   "domain is needed",
+		"https://{stack}.dev.example.com/ 0":    "does not exist",
+		"https://a.*.{stack}.com/ 80":           "only the first",
 	}
-	for ligne, attendu := range cas {
-		_, errs := Lire(ligne, "a", nil)
-		if len(errs) != 1 || !strings.Contains(errs[0].Error(), attendu) {
-			t.Errorf("%q : attendu %q, obtenu %v", ligne, attendu, errs)
+	for line, want := range cases {
+		_, errs := Parse(line, "a", nil)
+		if len(errs) != 1 || !strings.Contains(errs[0].Error(), want) {
+			t.Errorf("%q: want %q, got %v", line, want, errs)
 		}
 	}
-	if _, errs := Lire("https://{dossier}.dev.exemple.fr/ 80", "Mon_Dossier", nil); len(errs) != 1 {
-		t.Error("un nom de stack hors d'un label DNS est refusé")
+	if _, errs := Parse("https://{stack}.dev.example.com/ 80", "My_Stack", nil); len(errs) != 1 {
+		t.Error("a stack name outside a DNS label is refused")
 	}
 }
 
-func TestUneLigneFausseNEmporteQuElle(t *testing.T) {
-	rs, errs := Lire("https://pirate.fr/ 80\nhttps://{dossier}.dev.exemple.fr/ 80", "a", nil)
+func TestOneFaultyLineTakesOnlyItself(t *testing.T) {
+	rs, errs := Parse("https://intruder.com/ 80\nhttps://{stack}.dev.example.com/ 80", "a", nil)
 	if len(rs) != 1 || len(errs) != 1 {
-		t.Fatalf("%d routes, %d erreurs", len(rs), len(errs))
+		t.Fatalf("%d routes, %d errors", len(rs), len(errs))
 	}
 }

@@ -1,7 +1,7 @@
-// waggle : le routage de dev d'une machine, partagé par les projets, jamais sur internet (docs/adr/0001, 0002).
+// waggle: a machine's dev routing, shared by the projects, never on the internet (docs/adr/0001, 0002).
 //
-// Ces commandes tournent dans l'image de waggle ; `bin/waggle` les lance depuis l'hôte, avec le socket Docker, les réglages
-// et le dossier d'état.
+// These commands run inside waggle's image; `bin/waggle` starts them from the host, with the Docker socket, the
+// configuration file and the state directory.
 package main
 
 import (
@@ -20,89 +20,89 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/apiar-dev/apiar-waggle/internal/autorite"
-	"github.com/apiar-dev/apiar-waggle/internal/controleur"
+	"github.com/apiar-dev/apiar-waggle/internal/ca"
+	"github.com/apiar-dev/apiar-waggle/internal/config"
+	"github.com/apiar-dev/apiar-waggle/internal/controller"
 	"github.com/apiar-dev/apiar-waggle/internal/docker"
-	"github.com/apiar-dev/apiar-waggle/internal/generation"
-	"github.com/apiar-dev/apiar-waggle/internal/parefeu"
-	"github.com/apiar-dev/apiar-waggle/internal/reglages"
+	"github.com/apiar-dev/apiar-waggle/internal/firewall"
+	"github.com/apiar-dev/apiar-waggle/internal/render"
 )
 
-// Version : posée à la construction.
+// Version is set at build time.
 var Version = "dev"
 
-const aide = `waggle — le routage de dev d'une machine, partagé par les projets, jamais sur internet
+const usage = `waggle — a machine's dev routing, shared by the projects, never on the internet
 
-  installer          lit les réglages, écrit et lève chaque instance ; relancé, il ne change que ce qui a changé
-  arreter            arrête les instances, et garde leur autorité et leur configuration
-  desinstaller       retire les instances et leurs volumes ; --tout retire aussi leur autorité
-  etat               les conteneurs de chaque instance, et son autorité
-  autorite [nom]     le certificat de l'autorité d'une instance, à approuver sur un appareil
+  install            read the configuration, write and start each instance; run again, it only changes what changed
+  stop               stop the instances, keeping their authority and configuration
+  uninstall          remove the instances and their volumes; --all also removes their authority
+  status             each instance's containers, and its authority
+  ca [instance]      an instance's authority certificate, to trust on a device
   version
 
-  controleur         (dans l'instance) traduit les routes des stacks pour Traefik
-  pare-feu           (dans l'instance d'un serveur) pose la règle DOCKER-USER de son adresse
+  controller         (inside an instance) translate the stacks' routes for Traefik
+  firewall           (inside a server instance) put the DOCKER-USER rule for its address
 `
 
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Print(aide)
+		fmt.Print(usage)
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
-	case "installer":
-		err = installer()
-	case "arreter":
-		err = composer("down", "--remove-orphans")
-	case "desinstaller":
-		err = desinstaller(os.Args[2:])
-	case "etat":
-		err = afficherEtat()
-	case "autorite":
-		err = afficherAutorite(os.Args[2:])
-	case "controleur":
-		err = lancerControleur(os.Args[2:])
-	case "pare-feu":
-		err = lancerPareFeu(os.Args[2:])
+	case "install":
+		err = install()
+	case "stop":
+		err = composeAll("down", "--remove-orphans")
+	case "uninstall":
+		err = uninstall(os.Args[2:])
+	case "status":
+		err = status()
+	case "ca":
+		err = printCA(os.Args[2:])
+	case "controller":
+		err = runController(os.Args[2:])
+	case "firewall":
+		err = runFirewall(os.Args[2:])
 	case "version":
 		fmt.Println(Version)
-	case "aide", "-h", "--help":
-		fmt.Print(aide)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
 	default:
-		err = fmt.Errorf("commande inconnue : %s\n\n%s", os.Args[1], aide)
+		err = fmt.Errorf("unknown command: %s\n\n%s", os.Args[1], usage)
 	}
 	if err != nil {
-		log.Fatalf("waggle : %v", err)
+		log.Fatalf("waggle: %v", err)
 	}
 }
 
-func env(cle, defaut string) string {
-	if v := os.Getenv(cle); v != "" {
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return defaut
+	return fallback
 }
 
-func dossierEtat() (string, error) {
-	etat := os.Getenv("WAGGLE_ETAT")
-	if etat == "" {
-		return "", errors.New("WAGGLE_ETAT manque : lancer waggle par bin/waggle")
+func stateDir() (string, error) {
+	state := os.Getenv("WAGGLE_STATE")
+	if state == "" {
+		return "", errors.New("WAGGLE_STATE is missing: run waggle through bin/waggle")
 	}
-	return etat, nil
+	return state, nil
 }
 
-func instances() ([]*reglages.Instance, error) {
-	f, err := reglages.Lire(env("WAGGLE_REGLAGES_INTERNE", "/reglages.yaml"))
+func instances() ([]*config.Instance, error) {
+	f, err := config.Read(env("WAGGLE_CONFIG_PATH", "/config.yaml"))
 	if err != nil {
 		return nil, err
 	}
-	return reglages.Valider(f, reglages.Machine{Systeme: os.Getenv("WAGGLE_SYSTEME"), Cartes: reglages.CartesDeLaMachine})
+	return config.Validate(f, config.Host{OS: os.Getenv("WAGGLE_OS"), Links: config.HostLinks})
 }
 
-func installer() error {
-	etat, err := dossierEtat()
+func install() error {
+	state, err := stateDir()
 	if err != nil {
 		return err
 	}
@@ -111,101 +111,101 @@ func installer() error {
 		return err
 	}
 	image := env("WAGGLE_IMAGE", "waggle:local")
-	machine := env("WAGGLE_MACHINE", "cette machine")
-	voulues := map[string]bool{}
+	hostname := env("WAGGLE_HOSTNAME", "this machine")
+	wanted := map[string]bool{}
 	for _, inst := range insts {
-		voulues[inst.Nom] = true
-		if err := preparer(inst, filepath.Join(etat, inst.Nom), image, machine); err != nil {
-			return fmt.Errorf("instance %s : %w", inst.Nom, err)
+		wanted[inst.Name] = true
+		if err := prepare(inst, filepath.Join(state, inst.Name), image, hostname); err != nil {
+			return fmt.Errorf("instance %s: %w", inst.Name, err)
 		}
 	}
-	// Une instance retirée des réglages s'arrête ; son dossier, et son autorité, restent
-	anciennes, _ := filepath.Glob(filepath.Join(etat, "*", "compose.json"))
-	for _, compose := range anciennes {
-		nom := filepath.Base(filepath.Dir(compose))
-		if !voulues[nom] {
-			fmt.Printf("waggle : l'instance %s n'est plus dans les réglages, elle s'arrête\n", nom)
+	// An instance removed from the configuration stops; its directory, and its authority, stay
+	previous, _ := filepath.Glob(filepath.Join(state, "*", "compose.json"))
+	for _, compose := range previous {
+		name := filepath.Base(filepath.Dir(compose))
+		if !wanted[name] {
+			fmt.Printf("waggle: instance %s is no longer in the configuration, stopping it\n", name)
 			if err := dockerCompose(compose, "down", "--remove-orphans"); err != nil {
 				return err
 			}
 		}
 	}
 	for _, inst := range insts {
-		compose := filepath.Join(etat, inst.Nom, "compose.json")
+		compose := filepath.Join(state, inst.Name, "compose.json")
 		if err := dockerCompose(compose, "up", "--detach", "--remove-orphans", "--quiet-pull"); err != nil {
-			return fmt.Errorf("instance %s : %w", inst.Nom, err)
+			return fmt.Errorf("instance %s: %w", inst.Name, err)
 		}
-		resumer(inst, filepath.Join(etat, inst.Nom))
+		summarize(inst, filepath.Join(state, inst.Name))
 	}
 	return nil
 }
 
-// preparer écrit l'autorité, si elle manque, puis instance.json, le Corefile et compose.json.
-func preparer(inst *reglages.Instance, dossier, image, machine string) error {
-	if err := os.MkdirAll(filepath.Join(dossier, "autorite"), 0o700); err != nil {
+// prepare writes the authority, when missing, then instance.json, the Corefile and compose.json.
+func prepare(inst *config.Instance, dir, image, hostname string) error {
+	if err := os.MkdirAll(filepath.Join(dir, "ca"), 0o700); err != nil {
 		return err
 	}
-	cert := filepath.Join(dossier, "autorite", "autorite.crt")
+	cert := filepath.Join(dir, "ca", "ca.crt")
 	if _, err := os.Stat(cert); errors.Is(err, os.ErrNotExist) {
-		certPEM, clePEM, err := autorite.Creer(fmt.Sprintf("waggle %s (%s)", inst.Nom, machine), time.Now())
+		certPEM, keyPEM, err := ca.Create(fmt.Sprintf("waggle %s (%s)", inst.Name, hostname), time.Now())
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dossier, "autorite", "autorite.key"), clePEM, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "ca", "ca.key"), keyPEM, 0o600); err != nil {
 			return err
 		}
 		if err := os.WriteFile(cert, certPEM, 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("waggle : l'instance %s a son autorité, %s\n", inst.Nom, cert)
+		fmt.Printf("waggle: instance %s has its authority, %s\n", inst.Name, cert)
 	}
-	empreintes := map[string]string{}
+	hashes := map[string]string{}
 	instJSON, err := json.MarshalIndent(inst, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dossier, "instance.json"), append(instJSON, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "instance.json"), append(instJSON, '\n'), 0o644); err != nil {
 		return err
 	}
-	empreintes["controleur.instance"] = generation.Empreinte(instJSON)
+	hashes["controller.instance"] = render.Hash(instJSON)
 	if len(inst.DNS) > 0 {
-		corefile := []byte(generation.Corefile(inst))
-		if err := os.WriteFile(filepath.Join(dossier, "Corefile"), corefile, 0o644); err != nil {
+		corefile := []byte(render.Corefile(inst))
+		if err := os.WriteFile(filepath.Join(dir, "Corefile"), corefile, 0o644); err != nil {
 			return err
 		}
-		empreintes["dns.corefile"] = generation.Empreinte(corefile)
+		hashes["dns.corefile"] = render.Hash(corefile)
 	}
-	compose, err := json.MarshalIndent(generation.Compose(inst, dossier, image, empreintes), "", "  ")
+	compose, err := json.MarshalIndent(render.Compose(inst, dir, image, hashes), "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dossier, "compose.json"), append(compose, '\n'), 0o644)
+	return os.WriteFile(filepath.Join(dir, "compose.json"), append(compose, '\n'), 0o644)
 }
 
-func resumer(inst *reglages.Instance, dossier string) {
+func summarize(inst *config.Instance, dir string) {
 	var ports []string
-	for _, p := range inst.PortsPublies() {
-		if inst.DecalagePorts > 0 {
-			ports = append(ports, fmt.Sprintf("%d→%d", p+inst.DecalagePorts, p))
+	for _, p := range inst.PublishedPorts() {
+		if inst.PortOffset > 0 {
+			ports = append(ports, fmt.Sprintf("%d→%d", p+inst.PortOffset, p))
 		} else {
 			ports = append(ports, fmt.Sprint(p))
 		}
 	}
-	fmt.Printf("waggle : l'instance %s écoute sur %s, ports %s\n", inst.Nom, inst.Adresse, strings.Join(ports, ", "))
+	fmt.Printf("waggle: instance %s listens on %s, ports %s\n", inst.Name, inst.Address, strings.Join(ports, ", "))
 	if len(inst.DNS) > 0 {
-		fmt.Printf("  DNS du VPN, sur %s:%d, pour %s\n", inst.Adresse, 53+inst.DecalagePorts, strings.Join(inst.DNS, ", "))
+		fmt.Printf("  VPN DNS, on %s:%d, for %s\n", inst.Address, 53+inst.PortOffset, strings.Join(inst.DNS, ", "))
 	}
 	if inst.Interface != "" {
-		fmt.Printf("  pare-feu : %s\n", parefeu.Commande(inst.Adresse, inst.Interface))
+		fmt.Printf("  firewall: %s\n", firewall.Command(inst.Address, inst.Interface))
 	}
-	for _, r := range inst.Relais {
-		fmt.Printf("  relais vers %s : %s\n", r.Vers, strings.Join(r.Domaines, ", "))
+	for _, r := range inst.Relays {
+		fmt.Printf("  relay to %s: %s\n", r.To, strings.Join(r.Domains, ", "))
 	}
-	fmt.Printf("  autorité, à approuver sur chaque appareil : %s\n", filepath.Join(dossier, "autorite", "autorite.crt"))
+	fmt.Printf("  authority, to trust on each device: %s\n", filepath.Join(dir, "ca", "ca.crt"))
 }
 
-func composer(args ...string) error {
-	etat, err := dossierEtat()
+func composeAll(args ...string) error {
+	state, err := stateDir()
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func composer(args ...string) error {
 		return err
 	}
 	for _, inst := range insts {
-		compose := filepath.Join(etat, inst.Nom, "compose.json")
+		compose := filepath.Join(state, inst.Name, "compose.json")
 		if _, err := os.Stat(compose); err != nil {
 			continue
 		}
@@ -225,33 +225,33 @@ func composer(args ...string) error {
 	return nil
 }
 
-func desinstaller(args []string) error {
-	fs := flag.NewFlagSet("desinstaller", flag.ExitOnError)
-	tout := fs.Bool("tout", false, "retirer aussi le dossier d'état, autorité comprise")
+func uninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	all := fs.Bool("all", false, "also remove the state directory, authority included")
 	fs.Parse(args)
-	if err := composer("down", "--remove-orphans", "--volumes"); err != nil {
+	if err := composeAll("down", "--remove-orphans", "--volumes"); err != nil {
 		return err
 	}
-	if !*tout {
+	if !*all {
 		return nil
 	}
-	etat, _ := dossierEtat()
+	state, _ := stateDir()
 	insts, err := instances()
 	if err != nil {
 		return err
 	}
 	for _, inst := range insts {
-		dossier := filepath.Join(etat, inst.Nom)
-		if err := os.RemoveAll(dossier); err != nil {
+		dir := filepath.Join(state, inst.Name)
+		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
-		fmt.Printf("waggle : %s retiré, autorité comprise : les appareils qui l'approuvaient ne la reconnaîtront plus\n", dossier)
+		fmt.Printf("waggle: %s removed, authority included: devices that trusted it will no longer recognize it\n", dir)
 	}
 	return nil
 }
 
-func afficherEtat() error {
-	etat, err := dossierEtat()
+func status() error {
+	state, err := stateDir()
 	if err != nil {
 		return err
 	}
@@ -260,22 +260,22 @@ func afficherEtat() error {
 		return err
 	}
 	for _, inst := range insts {
-		dossier := filepath.Join(etat, inst.Nom)
-		fmt.Printf("== instance %s, sur %s\n", inst.Nom, inst.Adresse)
-		if _, err := os.Stat(filepath.Join(dossier, "compose.json")); err != nil {
-			fmt.Println("  pas installée (bin/waggle installer)")
+		dir := filepath.Join(state, inst.Name)
+		fmt.Printf("== instance %s, on %s\n", inst.Name, inst.Address)
+		if _, err := os.Stat(filepath.Join(dir, "compose.json")); err != nil {
+			fmt.Println("  not installed (bin/waggle install)")
 			continue
 		}
-		if err := dockerCompose(filepath.Join(dossier, "compose.json"), "ps"); err != nil {
+		if err := dockerCompose(filepath.Join(dir, "compose.json"), "ps"); err != nil {
 			return err
 		}
-		fmt.Printf("  autorité : %s\n", filepath.Join(dossier, "autorite", "autorite.crt"))
+		fmt.Printf("  authority: %s\n", filepath.Join(dir, "ca", "ca.crt"))
 	}
 	return nil
 }
 
-func afficherAutorite(args []string) error {
-	etat, err := dossierEtat()
+func printCA(args []string) error {
+	state, err := stateDir()
 	if err != nil {
 		return err
 	}
@@ -283,93 +283,93 @@ func afficherAutorite(args []string) error {
 	if err != nil {
 		return err
 	}
-	var noms []string
+	var names []string
 	for _, inst := range insts {
-		noms = append(noms, inst.Nom)
+		names = append(names, inst.Name)
 	}
-	sort.Strings(noms)
-	nom := ""
+	sort.Strings(names)
+	name := ""
 	switch {
 	case len(args) > 0:
-		nom = args[0]
-	case len(noms) == 1:
-		nom = noms[0]
+		name = args[0]
+	case len(names) == 1:
+		name = names[0]
 	default:
-		return fmt.Errorf("plusieurs instances : nommer celle dont on veut l'autorité (%s)", strings.Join(noms, ", "))
+		return fmt.Errorf("several instances: name the one whose authority you want (%s)", strings.Join(names, ", "))
 	}
-	contenu, err := os.ReadFile(filepath.Join(etat, nom, "autorite", "autorite.crt"))
+	content, err := os.ReadFile(filepath.Join(state, name, "ca", "ca.crt"))
 	if err != nil {
-		return fmt.Errorf("l'instance %s n'a pas d'autorité : bin/waggle installer d'abord", nom)
+		return fmt.Errorf("instance %s has no authority: run bin/waggle install first", name)
 	}
-	_, err = os.Stdout.Write(contenu)
+	_, err = os.Stdout.Write(content)
 	return err
 }
 
-func dockerCompose(fichier string, args ...string) error {
-	cmd := exec.Command("docker", append([]string{"compose", "--file", fichier}, args...)...)
+func dockerCompose(file string, args ...string) error {
+	cmd := exec.Command("docker", append([]string{"compose", "--file", file}, args...)...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker compose %s : %w", strings.Join(args, " "), err)
+		return fmt.Errorf("docker compose %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
 }
 
-func contexteArretable() (context.Context, context.CancelFunc) {
+func stoppableContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 }
 
-func lancerControleur(args []string) error {
-	fs := flag.NewFlagSet("controleur", flag.ExitOnError)
-	cheminInstance := fs.String("instance", "/etat/instance.json", "les réglages validés de l'instance")
-	dossierAutorite := fs.String("autorite", "/etat/autorite", "le dossier de l'autorité")
-	dynamique := fs.String("dynamique", generation.Dynamique, "le dossier que lit Traefik")
-	socket := fs.String("socket", "/var/run/docker.sock", "le socket de Docker")
+func runController(args []string) error {
+	fs := flag.NewFlagSet("controller", flag.ExitOnError)
+	instancePath := fs.String("instance", "/state/instance.json", "the instance's validated configuration")
+	caDir := fs.String("ca", "/state/ca", "the authority directory")
+	dynamic := fs.String("dynamic", render.DynamicDir, "the directory Traefik reads")
+	socket := fs.String("socket", "/var/run/docker.sock", "the Docker socket")
 	fs.Parse(args)
-	inst, a, err := controleur.Charger(*cheminInstance, *dossierAutorite)
+	inst, a, err := controller.Load(*instancePath, *caDir)
 	if err != nil {
 		return err
 	}
-	ctx, arreter := contexteArretable()
-	defer arreter()
-	journal := log.New(os.Stdout, "", log.Ltime)
-	journal.Printf("contrôleur de l'instance %s, sur %s", inst.Nom, inst.Adresse)
-	c := &controleur.Controleur{Instance: inst, Autorite: a, Docker: docker.Nouveau(*socket), Dossier: *dynamique, Journal: journal}
-	return c.Tourner(ctx)
+	ctx, stop := stoppableContext()
+	defer stop()
+	logger := log.New(os.Stdout, "", log.Ltime)
+	logger.Printf("controller of instance %s, on %s", inst.Name, inst.Address)
+	c := &controller.Controller{Instance: inst, CA: a, Docker: docker.New(*socket), Dir: *dynamic, Log: logger}
+	return c.Run(ctx)
 }
 
-func lancerPareFeu(args []string) error {
-	fs := flag.NewFlagSet("pare-feu", flag.ExitOnError)
-	adresse := fs.String("adresse", "", "l'adresse du VPN")
-	iface := fs.String("interface", "", "son interface WireGuard")
-	uneFois := fs.Bool("une-fois", false, "poser la règle, puis rendre la main")
-	intervalle := fs.Duration("intervalle", 15*time.Second, "l'intervalle entre deux vérifications")
+func runFirewall(args []string) error {
+	fs := flag.NewFlagSet("firewall", flag.ExitOnError)
+	address := fs.String("address", "", "the VPN address")
+	iface := fs.String("interface", "", "its WireGuard interface")
+	once := fs.Bool("once", false, "put the rule, then return")
+	interval := fs.Duration("interval", 15*time.Second, "the time between two checks")
 	fs.Parse(args)
-	if *adresse == "" || *iface == "" {
-		return errors.New("pare-feu : --adresse et --interface sont requis")
+	if *address == "" || *iface == "" {
+		return errors.New("firewall: --address and --interface are required")
 	}
-	ctx, arreter := contexteArretable()
-	defer arreter()
-	journal := log.New(os.Stdout, "", log.Ltime)
-	journal.Printf("pare-feu : %s", parefeu.Commande(*adresse, *iface))
+	ctx, stop := stoppableContext()
+	defer stop()
+	logger := log.New(os.Stdout, "", log.Ltime)
+	logger.Printf("firewall: %s", firewall.Command(*address, *iface))
 	for {
-		poses, err := parefeu.Assurer(parefeu.Systeme, *adresse, *iface)
+		put, err := firewall.Ensure(firewall.System, *address, *iface)
 		switch {
 		case err != nil:
-			journal.Printf("pare-feu : %v", err)
-			if *uneFois {
+			logger.Printf("firewall: %v", err)
+			if *once {
 				return err
 			}
-		case len(poses) > 0:
-			journal.Printf("pare-feu : règle posée (%s)", strings.Join(poses, ", "))
+		case len(put) > 0:
+			logger.Printf("firewall: rule put (%s)", strings.Join(put, ", "))
 		}
-		if *uneFois {
+		if *once {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			// La règle reste : waggle arrêté, rien n'est publié, et elle ne gêne personne
+			// The rule stays: with waggle stopped, nothing is published, and it bothers no one
 			return nil
-		case <-time.After(*intervalle):
+		case <-time.After(*interval):
 		}
 	}
 }

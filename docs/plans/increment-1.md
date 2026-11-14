@@ -2,7 +2,7 @@
 
 ## Ce que l'increment obtient
 
-waggle s'installe sur une machine, Mac ou serveur, d'une seule commande, `bin/waggle installer`.
+waggle s'installe sur une machine, Mac ou serveur, d'une seule commande, `bin/waggle install`.
 Il sert les stacks des projets d'après les routes qu'elles déclarent :
 - en HTTPS terminé par waggle ;
 - en HTTP sur `p80` ;
@@ -28,7 +28,7 @@ iOS, l'autorité de waggle.
     avec le socket Docker, le fichier de réglages et le dossier d'état.
   - Sur Linux, la commande lit les interfaces de l'hôte (`--network host`) pour vérifier les
     adresses.
-- **Les réglages, en YAML**, dans `~/.config/waggle/reglages.yaml`, non committé
+- **Les réglages, en YAML**, dans `~/.config/waggle/config.yaml`, non committé
   *(Benjamin, 2026-11-14)*. L'état de chaque instance va dans `~/.local/state/waggle/<instance>/` :
   - son autorité ;
   - `instance.json`, ses réglages validés ;
@@ -36,15 +36,15 @@ iOS, l'autorité de waggle.
   - son `Corefile`.
 - **Une instance, un projet Compose `waggle-<instance>`**, de trois ou quatre services :
   - `traefik` (v3.6), sans le socket Docker : il ne lit que des fichiers ;
-  - `controleur`, le compagnon devenu traducteur (ADR-0002, décision 1). Seul à monter le
+  - `controller`, le compagnon devenu traducteur (ADR-0002, décision 1). Seul à monter le
     socket, il branche chaque service routé sur le réseau `waggle-<instance>`, traduit ses
     `waggle.routes`, émet les certificats, et écrit la configuration de Traefik dans un
     volume. Le piège de la relecture de Traefik disparaît avec le fournisseur Docker ;
   - `dns`, un CoreDNS, s'il y a des domaines à résoudre pour le VPN ;
-  - `pare-feu`, sur une adresse de VPN : il pose la règle `DOCKER-USER`, et la repose à chaque
+  - `firewall`, sur une adresse de VPN : il pose la règle `DOCKER-USER`, et la repose à chaque
     démarrage de Docker, puisqu'il redémarre avec lui. C'est la persistance que demandait
     l'ADR-0001.
-- **Le relais d'un domaine terminé** vise le point d'entrée `relais` du serveur, en HTTP.
+- **Le relais d'un domaine terminé** vise le point d'entrée `relay` du serveur, en HTTP.
   - Le poste y nomme, dans `X-Waggle-Port`, le point d'entrée où la requête lui est arrivée.
     Une route du port 3000 n'y répond qu'à `X-Waggle-Port: 3000`.
   - `X-Forwarded-Port` ne convient pas : il reprend le port de l'en-tête `Host`, qui ne dit
@@ -55,7 +55,7 @@ iOS, l'autorité de waggle.
   renouvellement à 30 jours du terme. Ils satisfont Apple (825 jours au plus, même pour une
   autorité privée) comme Android. L'autorité est en X.509 v3, `CA:TRUE`, et dure 10 ans ;
   Android n'installe comme autorité qu'un certificat qui se dit tel.
-- **Un décalage de ports** (`decalage_ports`) pour les essais : une instance publie le
+- **Un décalage de ports** (`port_offset`) pour les essais : une instance publie le
   port `p` sur `p + décalage`. La suite d'intégration tourne ainsi à côté des proxies du
   poste.
 
@@ -64,8 +64,8 @@ iOS, l'autorité de waggle.
 | Fait | Vérifié ? |
 | --- | --- |
 | Traefik relit un dossier de configuration (`providers.file.directory`, `watch`) écrit par un autre conteneur dans un volume | **oui**, `make integration` : routes servies, retirées, et un contrôleur redémarré sans perte. La relecture prend jusqu'à deux secondes (`providersThrottleDuration`) |
-| Traefik route une requête d'après `Header(`X-Waggle-Port`, …)` sur le point d'entrée `relais` | **oui**, `make integration` : le relais d'un port historique arrive à sa route ; sans l'en-tête, 404 |
-| Un conteneur `network_mode: host` muni de `NET_ADMIN` pose une règle dans le `DOCKER-USER` de l'hôte | **oui**, `make pare-feu`, dans un Docker-in-Docker : posée sur `iptables-nft`, une seule fois ; le membre passe, le voisin et l'autre VPN non |
+| Traefik route une requête d'après `Header(`X-Waggle-Port`, …)` sur le point d'entrée `relay` | **oui**, `make integration` : le relais d'un port historique arrive à sa route ; sans l'en-tête, 404 |
+| Un conteneur `network_mode: host` muni de `NET_ADMIN` pose une règle dans le `DOCKER-USER` de l'hôte | **oui**, `make firewall`, dans un Docker-in-Docker : posée sur `iptables-nft`, une seule fois ; le membre passe, le voisin et l'autre VPN non |
 | Sonder `iptables-legacy` sur un hôte en nftables est sans effet | **non** : il y crée des tables vides, d'où un avertissement. waggle s'arrête au premier pare-feu qui porte la chaîne |
 | Le DNS du VPN répond en UDP et en TCP | **oui**, `make integration` : A pour le domaine, AAAA vide en `NOERROR`, le reste relayé |
 | Chrome pour Android fait confiance à une autorité installée par l'utilisateur | à constater sur le Pixel (`docs/essais`, § 5) |

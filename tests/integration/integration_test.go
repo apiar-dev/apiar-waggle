@@ -1,14 +1,14 @@
 //go:build integration
 
-// La suite d'intégration : de vraies instances de waggle, levées par bin/waggle, et des stacks jetables derrière elles. Un
-// routage ne se lit pas, il s'exécute.
+// The integration suite: real waggle instances, started by bin/waggle, and throwaway stacks behind them. Routing is not
+// read, it is run.
 //
-// Deux instances sur cette machine, sur des ports décalés pour tourner à côté de ce qui écoute déjà :
-//   - « poste » (+20000) termine le TLS de ses stacks, sert le HTTP sur p80 et le passage, et relaie au « serveur » ce qu'il
-//     ne sert pas, par host.docker.internal, comme vers une adresse WireGuard ;
-//   - « serveur » (+30000) a un point d'entrée relais, et un DNS du VPN.
+// Two instances on this machine, on offset ports so they run next to whatever already listens:
+//   - "workstation" (+20000) terminates its stacks' TLS, serves plain HTTP on p80 and passthrough, and relays to the
+//     "server" what it does not serve, through host.docker.internal, as it would to a WireGuard address;
+//   - "server" (+30000) has a relay entry point, and a VPN DNS.
 //
-// Tout est retiré à la fin : les stacks, les instances, leurs volumes, leur autorité, le dossier .essais/<id>.
+// Everything is removed at the end: stacks, instances, their volumes, their authority, the .tests/<id> directory.
 package integration
 
 import (
@@ -34,131 +34,130 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"github.com/apiar-dev/apiar-waggle/internal/autorite"
+	"github.com/apiar-dev/apiar-waggle/internal/ca"
 )
 
 const (
-	decPoste   = 20000
-	decServeur = 30000
+	workstationOffset = 20000
+	serverOffset      = 30000
 )
 
 var (
-	hote    = valeur("WAGGLE_ESSAI_HOTE", "host.docker.internal")
-	racine  string
-	id      string
-	dossier string
-	// Les autorités : celle de chaque instance, et celle d'un projet en passage
-	caPoste, caServeur, caProjet *x509.CertPool
-	caProjetNom                  string
+	host = envOr("WAGGLE_TEST_HOST", "host.docker.internal")
+	root string
+	id   string
+	dir  string
+	// The authorities: each instance's, and that of a passthrough project
+	workstationCA, serverCA, projectCA *x509.CertPool
+	projectCAName                      string
 )
 
-func valeur(cle, defaut string) string {
-	if v := os.Getenv(cle); v != "" {
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return defaut
+	return fallback
 }
 
-func pile(lettre string) string { return id + "-" + lettre }
+func stack(letter string) string { return id + "-" + letter }
 
 func TestMain(m *testing.M) {
 	wd, _ := os.Getwd()
-	racine = filepath.Dir(filepath.Dir(wd))
-	octets := make([]byte, 3)
-	rand.Read(octets)
-	id = "we" + hex.EncodeToString(octets)
-	dossier = filepath.Join(racine, ".essais", id)
+	root = filepath.Dir(filepath.Dir(wd))
+	b := make([]byte, 3)
+	rand.Read(b)
+	id = "wt" + hex.EncodeToString(b)
+	dir = filepath.Join(root, ".tests", id)
 	code := 1
-	if err := monter(); err != nil {
-		log.Printf("la mise en place a échoué : %v", err)
+	if err := setup(); err != nil {
+		log.Printf("setup failed: %v", err)
 	} else {
 		code = m.Run()
 	}
 	if code != 0 {
-		for _, inst := range []string{"poste", "serveur"} {
-			sortie, _ := exec.Command("docker", "logs", "waggle-"+id+"-"+inst+"-controleur-1").CombinedOutput()
-			log.Printf("== journal du contrôleur %s\n%s", inst, sortie)
+		for _, inst := range []string{"workstation", "server"} {
+			out, _ := exec.Command("docker", "logs", "waggle-"+id+"-"+inst+"-controller-1").CombinedOutput()
+			log.Printf("== %s controller log\n%s", inst, out)
 		}
 	}
-	if os.Getenv("WAGGLE_ESSAI_GARDER") != "" {
-		log.Printf("WAGGLE_ESSAI_GARDER : tout reste levé, dans %s", dossier)
+	if os.Getenv("WAGGLE_TEST_KEEP") != "" {
+		log.Printf("WAGGLE_TEST_KEEP: everything stays up, in %s", dir)
 		os.Exit(code)
 	}
-	demonter()
+	teardown()
 	os.Exit(code)
 }
 
-func lancer(env []string, nom string, args ...string) (string, error) {
-	cmd := exec.Command(nom, args...)
+func run(env []string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
 	cmd.Env = append(os.Environ(), env...)
-	cmd.Dir = racine
-	sortie, err := cmd.CombinedOutput()
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(sortie), fmt.Errorf("%s %s : %v\n%s", nom, strings.Join(args, " "), err, sortie)
+		return string(out), fmt.Errorf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
 	}
-	return string(sortie), nil
+	return string(out), nil
 }
 
 func waggle(args ...string) (string, error) {
-	return lancer([]string{
-		"WAGGLE_REGLAGES=" + filepath.Join(dossier, "reglages.yaml"),
-		"WAGGLE_ETAT=" + filepath.Join(dossier, "etat"),
-	}, filepath.Join(racine, "bin", "waggle"), args...)
+	return run([]string{
+		"WAGGLE_CONFIG=" + filepath.Join(dir, "config.yaml"),
+		"WAGGLE_STATE=" + filepath.Join(dir, "state"),
+	}, filepath.Join(root, "bin", "waggle"), args...)
 }
 
-func monter() error {
-	if err := os.MkdirAll(filepath.Join(dossier, "projet"), 0o755); err != nil {
+func setup() error {
+	if err := os.MkdirAll(filepath.Join(dir, "project"), 0o755); err != nil {
 		return err
 	}
-	// L'autorité d'un projet en passage, et les certificats de ses deux stacks
-	maintenant := time.Now()
-	caNom := "autorite d'un projet, " + id
-	certPEM, clePEM, err := autorite.Creer(caNom, maintenant)
+	// A passthrough project's authority, and the certificates of its two stacks
+	now := time.Now()
+	projectCAName = "a project's authority, " + id
+	certPEM, keyPEM, err := ca.Create(projectCAName, now)
 	if err != nil {
 		return err
 	}
-	caProjetNom = caNom
-	ap, _ := autorite.Charger(certPEM, clePEM)
-	caProjet = x509.NewCertPool()
-	caProjet.AppendCertsFromPEM(certPEM)
-	for _, lettre := range []string{"p-t", "s-q"} {
-		nom := pile(lettre) + ".ancien.test"
-		c, k, err := ap.Emettre([]string{nom}, maintenant)
+	pa, _ := ca.Load(certPEM, keyPEM)
+	projectCA = x509.NewCertPool()
+	projectCA.AppendCertsFromPEM(certPEM)
+	for _, letter := range []string{"w-t", "s-q"} {
+		name := stack(letter) + ".legacy.test"
+		c, k, err := pa.Issue([]string{name}, now)
 		if err != nil {
 			return err
 		}
-		os.WriteFile(filepath.Join(dossier, "projet", nom+".crt"), c, 0o644)
-		os.WriteFile(filepath.Join(dossier, "projet", nom+".key"), k, 0o644)
+		os.WriteFile(filepath.Join(dir, "project", name+".crt"), c, 0o644)
+		os.WriteFile(filepath.Join(dir, "project", name+".key"), k, 0o644)
 	}
 
-	reglages := fmt.Sprintf(`instances:
-  %[1]s-poste:
-    adresse: 127.0.0.1
-    decalage_ports: %[2]d
+	cfg := fmt.Sprintf(`instances:
+  %[1]s-workstation:
+    address: 127.0.0.1
+    port_offset: %[2]d
     ports: [3000]
-    projets: [%[1]s-p]
-    relais:
-      - vers: host.docker.internal
-        decalage_ports: %[3]d
-        domaines: [https://essai.test, tls://ancien.test, http://localhost]
-  %[1]s-serveur:
-    adresse: 127.0.0.1
-    decalage_ports: %[3]d
+    projects: [%[1]s-w]
+    relays:
+      - to: host.docker.internal
+        port_offset: %[3]d
+        domains: [https://example.test, tls://legacy.test, http://localhost]
+  %[1]s-server:
+    address: 127.0.0.1
+    port_offset: %[3]d
     ports: [3000]
-    projets: [%[1]s-s]
-    dns: [essai.test]
-    relais_entrant: {port: 8080, confiance: [0.0.0.0/0]}
-`, id, decPoste, decServeur)
-	if err := os.WriteFile(filepath.Join(dossier, "reglages.yaml"), []byte(reglages), 0o644); err != nil {
+    projects: [%[1]s-s]
+    dns: [example.test]
+    relay_listener: {port: 8080, trusted_ips: [0.0.0.0/0]}
+`, id, workstationOffset, serverOffset)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 		return err
 	}
-	if sortie, err := waggle("installer"); err != nil {
+	out, err := waggle("install")
+	if err != nil {
 		return err
-	} else {
-		log.Print(sortie)
 	}
-	for inst, pool := range map[string]**x509.CertPool{"poste": &caPoste, "serveur": &caServeur} {
-		pem, err := os.ReadFile(filepath.Join(dossier, "etat", id+"-"+inst, "autorite", "autorite.crt"))
+	log.Print(out)
+	for inst, pool := range map[string]**x509.CertPool{"workstation": &workstationCA, "server": &serverCA} {
+		pem, err := os.ReadFile(filepath.Join(dir, "state", id+"-"+inst, "ca", "ca.crt"))
 		if err != nil {
 			return err
 		}
@@ -166,143 +165,143 @@ func monter() error {
 		(*pool).AppendCertsFromPEM(pem)
 	}
 
-	piles := map[string]map[string]string{
-		"p-a": {
-			"front": "https://{dossier}.essai.test/ 8080\nhttps://{dossier}.essai.test:3000/ 8081\nhttps://api.{dossier}.essai.test/ 8080\nhttp://admin.{dossier}.localhost/ 8080",
-			"api":   "https://{dossier}.essai.test/api 8080",
+	stacks := map[string]map[string]string{
+		"w-a": {
+			"front": "https://{stack}.example.test/ 8080\nhttps://{stack}.example.test:3000/ 8081\nhttps://api.{stack}.example.test/ 8080\nhttp://admin.{stack}.localhost/ 8080",
+			"api":   "https://{stack}.example.test/api 8080",
 		},
-		"p-b": {"front": "https://{dossier}.essai.test/ 8080\nhttps://pirate.essai.test/ 8080"},
-		"p-t": {"front": "tls://{dossier}.ancien.test 8443"},
-		"s-r": {"front": "https://{dossier}.essai.test/ 8080\nhttps://{dossier}.essai.test:3000/ 8081\nhttp://{dossier}.localhost/ 8080"},
-		"s-q": {"front": "tls://{dossier}.ancien.test 8443"},
+		"w-b": {"front": "https://{stack}.example.test/ 8080\nhttps://intruder.example.test/ 8080"},
+		"w-t": {"front": "tls://{stack}.legacy.test 8443"},
+		"s-r": {"front": "https://{stack}.example.test/ 8080\nhttps://{stack}.example.test:3000/ 8081\nhttp://{stack}.localhost/ 8080"},
+		"s-q": {"front": "tls://{stack}.legacy.test 8443"},
 	}
-	for lettre, services := range piles {
-		if err := ecrirePile(lettre, services); err != nil {
+	for letter, services := range stacks {
+		if err := writeStack(letter, services); err != nil {
 			return err
 		}
-		if _, err := lancer(nil, "docker", "compose", "-f", filepath.Join(dossier, pile(lettre), "compose.yaml"), "up", "-d", "--quiet-pull"); err != nil {
+		if _, err := run(nil, "docker", "compose", "-f", filepath.Join(dir, stack(letter), "compose.yaml"), "up", "-d", "--quiet-pull"); err != nil {
 			return err
 		}
 	}
-	// Le contrôleur voit les stacks, branche, écrit ; Traefik relit, au plus toutes les deux secondes. Chaque stack répond
-	// avant que les essais commencent
-	pretes := []struct {
-		nom     string
-		port    int
-		ca      *x509.CertPool
-		reponse string
+	// The controller sees the stacks, connects, writes; Traefik reloads, at most every two seconds. Every stack answers
+	// before the tests start
+	ready := []struct {
+		name   string
+		port   int
+		pool   *x509.CertPool
+		answer string
 	}{
-		{pile("p-a") + ".essai.test", 443 + decPoste, caPoste, pile("p-a") + " front"},
-		{pile("p-b") + ".essai.test", 443 + decPoste, caPoste, pile("p-b") + " front"},
-		{pile("p-t") + ".ancien.test", 443 + decPoste, caProjet, pile("p-t") + " front"},
-		{pile("s-r") + ".essai.test", 443 + decServeur, caServeur, pile("s-r") + " front"},
-		{pile("s-q") + ".ancien.test", 443 + decServeur, caProjet, pile("s-q") + " front"},
+		{stack("w-a") + ".example.test", 443 + workstationOffset, workstationCA, stack("w-a") + " front"},
+		{stack("w-b") + ".example.test", 443 + workstationOffset, workstationCA, stack("w-b") + " front"},
+		{stack("w-t") + ".legacy.test", 443 + workstationOffset, projectCA, stack("w-t") + " front"},
+		{stack("s-r") + ".example.test", 443 + serverOffset, serverCA, stack("s-r") + " front"},
+		{stack("s-q") + ".legacy.test", 443 + serverOffset, projectCA, stack("s-q") + " front"},
 	}
-	return attendre(func() error {
-		for _, p := range pretes {
-			_, corps, _, err := demander("https", p.nom, p.port, "/", p.ca)
-			if err != nil || !strings.Contains(corps, p.reponse) {
-				return fmt.Errorf("%s : %q, %v", p.nom, corps, err)
+	return waitFor(func() error {
+		for _, r := range ready {
+			_, body, _, err := get("https", r.name, r.port, "/", r.pool)
+			if err != nil || !strings.Contains(body, r.answer) {
+				return fmt.Errorf("%s: %q, %v", r.name, body, err)
 			}
 		}
 		return nil
 	}, 90*time.Second)
 }
 
-func ecrirePile(lettre string, services map[string]string) error {
-	d := filepath.Join(dossier, pile(lettre))
+func writeStack(letter string, services map[string]string) error {
+	d := filepath.Join(dir, stack(letter))
 	os.MkdirAll(d, 0o755)
-	projet := id + "-" + lettre[:1]
+	project := id + "-" + letter[:1]
 	var compose strings.Builder
-	fmt.Fprintf(&compose, "name: %s\nservices:\n", pile(lettre))
-	for service, routes := range services {
+	fmt.Fprintf(&compose, "name: %s\nservices:\n", stack(letter))
+	for service, rs := range services {
 		var conf string
-		if strings.HasPrefix(routes, "tls://") {
-			nom := pile(lettre) + ".ancien.test"
-			conf = fmt.Sprintf("server { listen 8443 ssl; ssl_certificate /certs/%[1]s.crt; ssl_certificate_key /certs/%[1]s.key; default_type text/plain; return 200 '%[2]s %[3]s passage $ssl_server_name'; }\n", nom, pile(lettre), service)
+		if strings.HasPrefix(rs, "tls://") {
+			name := stack(letter) + ".legacy.test"
+			conf = fmt.Sprintf("server { listen 8443 ssl; ssl_certificate /certs/%[1]s.crt; ssl_certificate_key /certs/%[1]s.key; default_type text/plain; return 200 '%[2]s %[3]s passthrough $ssl_server_name'; }\n", name, stack(letter), service)
 		} else {
 			for _, port := range []int{8080, 8081} {
-				conf += fmt.Sprintf("server { listen %d; default_type text/plain; return 200 '%s %s %d host=$host proto=$http_x_forwarded_proto'; }\n", port, pile(lettre), service, port)
+				conf += fmt.Sprintf("server { listen %d; default_type text/plain; return 200 '%s %s %d host=$host proto=$http_x_forwarded_proto'; }\n", port, stack(letter), service, port)
 			}
 		}
 		os.WriteFile(filepath.Join(d, service+".conf"), []byte(conf), 0o644)
-		fmt.Fprintf(&compose, "  %s:\n    image: nginx:1.27-alpine\n    volumes: [\"./%s.conf:/etc/nginx/conf.d/default.conf:ro\", \"../projet:/certs:ro\"]\n", service, service)
-		fmt.Fprintf(&compose, "    labels:\n      waggle.projet: %s\n      waggle.routes: |\n", projet)
-		for _, ligne := range strings.Split(routes, "\n") {
-			fmt.Fprintf(&compose, "        %s\n", ligne)
+		fmt.Fprintf(&compose, "  %s:\n    image: nginx:1.27-alpine\n    volumes: [\"./%s.conf:/etc/nginx/conf.d/default.conf:ro\", \"../project:/certs:ro\"]\n", service, service)
+		fmt.Fprintf(&compose, "    labels:\n      waggle.project: %s\n      waggle.routes: |\n", project)
+		for _, line := range strings.Split(rs, "\n") {
+			fmt.Fprintf(&compose, "        %s\n", line)
 		}
 	}
 	return os.WriteFile(filepath.Join(d, "compose.yaml"), []byte(compose.String()), 0o644)
 }
 
-func demonter() {
-	entrees, _ := os.ReadDir(dossier)
-	for _, e := range entrees {
-		if compose := filepath.Join(dossier, e.Name(), "compose.yaml"); e.IsDir() && fichierExiste(compose) {
-			lancer(nil, "docker", "compose", "-f", compose, "down", "--volumes", "--remove-orphans")
+func teardown() {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if compose := filepath.Join(dir, e.Name(), "compose.yaml"); e.IsDir() && exists(compose) {
+			run(nil, "docker", "compose", "-f", compose, "down", "--volumes", "--remove-orphans")
 		}
 	}
-	if fichierExiste(filepath.Join(dossier, "reglages.yaml")) {
-		if sortie, err := waggle("desinstaller", "--tout"); err != nil {
-			log.Printf("désinstallation : %v %s", err, sortie)
+	if exists(filepath.Join(dir, "config.yaml")) {
+		if out, err := waggle("uninstall", "--all"); err != nil {
+			log.Printf("uninstall: %v %s", err, out)
 		}
 	}
-	os.RemoveAll(dossier)
+	os.RemoveAll(dir)
 }
 
-func fichierExiste(chemin string) bool {
-	_, err := os.Stat(chemin)
+func exists(path string) bool {
+	_, err := os.Stat(path)
 	return err == nil
 }
 
-func attendre(essai func() error, delai time.Duration) error {
-	fin := time.Now().Add(delai)
+func waitFor(try func() error, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	var err error
-	for time.Now().Before(fin) {
-		if err = essai(); err == nil {
+	for time.Now().Before(deadline) {
+		if err = try(); err == nil {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("délai dépassé : %v", err)
+	return fmt.Errorf("timed out: %v", err)
 }
 
-// demander : une connexion neuve, comme la première d'un navigateur vers ce nom, et une requête.
-func demander(schema, nom string, port int, chemin string, racines *x509.CertPool) (int, string, *x509.Certificate, error) {
+// get opens a fresh connection, like a browser's first one to this name, and sends one request.
+func get(scheme, name string, port int, path string, roots *x509.CertPool) (int, string, *x509.Certificate, error) {
 	t := &http.Transport{
 		DisableKeepAlives: true,
 		ForceAttemptHTTP2: true,
-		TLSClientConfig:   &tls.Config{RootCAs: racines, ServerName: nom},
-		// Le nom ne se résout pas : tout va à l'adresse où écoute l'instance, comme le DNS d'un poste l'y enverrait
+		TLSClientConfig:   &tls.Config{RootCAs: roots, ServerName: name},
+		// The name does not resolve: everything goes to where the instance listens, as a workstation's DNS would send it
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(hote, strconv.Itoa(port)))
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		},
 	}
 	client := &http.Client{Transport: t, Timeout: 5 * time.Second}
-	rep, err := client.Get(fmt.Sprintf("%s://%s:%d%s", schema, nom, port, chemin))
+	resp, err := client.Get(fmt.Sprintf("%s://%s:%d%s", scheme, name, port, path))
 	if err != nil {
 		return 0, "", nil, err
 	}
-	defer rep.Body.Close()
-	corps, _ := io.ReadAll(rep.Body)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	var cert *x509.Certificate
-	if rep.TLS != nil && len(rep.TLS.PeerCertificates) > 0 {
-		cert = rep.TLS.PeerCertificates[0]
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		cert = resp.TLS.PeerCertificates[0]
 	}
-	return rep.StatusCode, strings.TrimSpace(string(corps)), cert, nil
+	return resp.StatusCode, strings.TrimSpace(string(body)), cert, nil
 }
 
-// connexionH2 : une seule connexion HTTP/2, ouverte pour un nom, qui portera des requêtes pour d'autres noms — ce que fait un
-// navigateur quand le certificat couvre le nouveau nom et que l'adresse est la même.
-func connexionH2(t *testing.T, sni string, port int, racines *x509.CertPool) (*http2.ClientConn, *x509.Certificate) {
+// h2Conn is a single HTTP/2 connection, opened for one name, that will carry requests for other names — what a browser
+// does when the certificate covers the new name and the address is the same.
+func h2Conn(t *testing.T, sni string, port int, roots *x509.CertPool) (*http2.ClientConn, *x509.Certificate) {
 	t.Helper()
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", net.JoinHostPort(hote, strconv.Itoa(port)),
-		&tls.Config{ServerName: sni, RootCAs: racines, NextProtos: []string{"h2"}})
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", net.JoinHostPort(host, strconv.Itoa(port)),
+		&tls.Config{ServerName: sni, RootCAs: roots, NextProtos: []string{"h2"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if conn.ConnectionState().NegotiatedProtocol != "h2" {
-		t.Fatalf("pas de HTTP/2 : %q", conn.ConnectionState().NegotiatedProtocol)
+		t.Fatalf("no HTTP/2: %q", conn.ConnectionState().NegotiatedProtocol)
 	}
 	cc, err := (&http2.Transport{}).NewClientConn(conn)
 	if err != nil {
@@ -311,238 +310,238 @@ func connexionH2(t *testing.T, sni string, port int, racines *x509.CertPool) (*h
 	return cc, conn.ConnectionState().PeerCertificates[0]
 }
 
-func surLaConnexion(t *testing.T, cc *http2.ClientConn, nom string, port int, chemin string) (int, string) {
+func onConn(t *testing.T, cc *http2.ClientConn, name string, port int, path string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s:%d%s", nom, port, chemin), nil)
-	rep, err := cc.RoundTrip(req)
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s:%d%s", name, port, path), nil)
+	resp, err := cc.RoundTrip(req)
 	if err != nil {
-		t.Fatalf("%s sur la connexion : %v", nom, err)
+		t.Fatalf("%s on the connection: %v", name, err)
 	}
-	defer rep.Body.Close()
-	corps, _ := io.ReadAll(rep.Body)
-	return rep.StatusCode, strings.TrimSpace(string(corps))
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, strings.TrimSpace(string(body))
 }
 
-func attendu(t *testing.T, quoi string, statut int, corps string, err error, morceau string) {
+func expect(t *testing.T, what string, status int, body string, err error, part string) {
 	t.Helper()
-	if err != nil || statut != 200 || !strings.Contains(corps, morceau) {
-		t.Errorf("%s : %d %q %v ; attendu %q", quoi, statut, corps, err, morceau)
+	if err != nil || status != 200 || !strings.Contains(body, part) {
+		t.Errorf("%s: %d %q %v; want %q", what, status, body, err, part)
 	}
 }
 
-func TestHTTPSTermineParWaggle(t *testing.T) {
-	a := pile("p-a") + ".essai.test"
-	statut, corps, cert, err := demander("https", a, 443+decPoste, "/", caPoste)
-	attendu(t, "https, une connexion neuve", statut, corps, err, pile("p-a")+" front 8080")
-	if !strings.Contains(corps, "proto=https") {
-		t.Errorf("l'application reçoit X-Forwarded-Proto : %q", corps)
+func TestHTTPSTerminatedByWaggle(t *testing.T) {
+	a := stack("w-a") + ".example.test"
+	status, body, cert, err := get("https", a, 443+workstationOffset, "/", workstationCA)
+	expect(t, "https, a fresh connection", status, body, err, stack("w-a")+" front 8080")
+	if !strings.Contains(body, "proto=https") {
+		t.Errorf("the application receives X-Forwarded-Proto: %q", body)
 	}
-	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-poste") {
-		t.Fatalf("le certificat est signé par l'autorité de l'instance : %v", cert)
+	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-workstation") {
+		t.Fatalf("the certificate is signed by the instance's authority: %v", cert)
 	}
 	if d := cert.NotAfter.Sub(cert.NotBefore); d > 398*24*time.Hour {
-		t.Errorf("un certificat de %v", d)
+		t.Errorf("a certificate of %v", d)
 	}
-	statut, corps, _, err = demander("https", a, 443+decPoste, "/api/x", caPoste)
-	attendu(t, "un chemin, vers un autre service", statut, corps, err, pile("p-a")+" api")
-	statut, corps, _, err = demander("https", a, 443+decPoste, "/apiv2", caPoste)
-	attendu(t, "/apiv2 n'est pas sous /api", statut, corps, err, pile("p-a")+" front")
-	statut, corps, _, err = demander("https", a, 3000+decPoste, "/", caPoste)
-	attendu(t, "un port historique, terminé par waggle", statut, corps, err, pile("p-a")+" front 8081")
-	statut, corps, cert, err = demander("https", "api."+a, 443+decPoste, "/", caPoste)
-	attendu(t, "un nom à deux labels", statut, corps, err, pile("p-a")+" front 8080")
+	status, body, _, err = get("https", a, 443+workstationOffset, "/api/x", workstationCA)
+	expect(t, "a path, to another service", status, body, err, stack("w-a")+" api")
+	status, body, _, err = get("https", a, 443+workstationOffset, "/apiv2", workstationCA)
+	expect(t, "/apiv2 is not below /api", status, body, err, stack("w-a")+" front")
+	status, body, _, err = get("https", a, 3000+workstationOffset, "/", workstationCA)
+	expect(t, "a legacy port, terminated by waggle", status, body, err, stack("w-a")+" front 8081")
+	status, body, cert, err = get("https", "api."+a, 443+workstationOffset, "/", workstationCA)
+	expect(t, "a two-label name", status, body, err, stack("w-a")+" front 8080")
 	if cert != nil && cert.VerifyHostname("api."+a) != nil {
-		t.Error("le certificat de la stack couvre ses noms à deux labels")
+		t.Error("the stack's certificate covers its two-label names")
 	}
 }
 
-func TestUneConnexionHTTP2PourPlusieursStacks(t *testing.T) {
-	// b n'a que des noms à un label : il est servi sous le joker du domaine, qui couvre aussi a et r. La stack a, elle, a
-	// son propre certificat (elle a un nom à deux labels), qui ne couvre qu'elle : un navigateur n'y mettrait pas b
-	a, b, r := pile("p-a")+".essai.test", pile("p-b")+".essai.test", pile("s-r")+".essai.test"
-	cc, cert := connexionH2(t, b, 443+decPoste, caPoste)
+func TestOneHTTP2ConnectionForSeveralStacks(t *testing.T) {
+	// b only has one-label names: it is served under the domain's wildcard, which also covers a and r. Stack a has its
+	// own certificate (it has a two-label name), which covers only itself: a browser would not put b on it
+	a, b, r := stack("w-a")+".example.test", stack("w-b")+".example.test", stack("s-r")+".example.test"
+	cc, cert := h2Conn(t, b, 443+workstationOffset, workstationCA)
 	if cert.VerifyHostname(a) != nil || cert.VerifyHostname(r) != nil {
-		t.Fatalf("le joker du domaine couvre les autres stacks, et un navigateur réutiliserait la connexion : %v", cert.DNSNames)
+		t.Fatalf("the domain's wildcard covers the other stacks, and a browser would reuse the connection: %v", cert.DNSNames)
 	}
-	for _, cas := range []struct{ nom, chemin, morceau string }{
-		{b, "/", pile("p-b") + " front"},
-		{a, "/", pile("p-a") + " front"},
-		{a, "/api", pile("p-a") + " api"},
-		{r, "/", pile("s-r") + " front 8080"}, // un nom du serveur, relayé sur la même connexion
-		{b, "/", pile("p-b") + " front"},
+	for _, c := range []struct{ name, path, part string }{
+		{b, "/", stack("w-b") + " front"},
+		{a, "/", stack("w-a") + " front"},
+		{a, "/api", stack("w-a") + " api"},
+		{r, "/", stack("s-r") + " front 8080"}, // a server name, relayed on the same connection
+		{b, "/", stack("w-b") + " front"},
 	} {
-		statut, corps := surLaConnexion(t, cc, cas.nom, 443+decPoste, cas.chemin)
-		attendu(t, "sur la connexion de b, "+cas.nom+cas.chemin, statut, corps, nil, cas.morceau)
+		status, body := onConn(t, cc, c.name, 443+workstationOffset, c.path)
+		expect(t, "on b's connection, "+c.name+c.path, status, body, nil, c.part)
 	}
-	if _, certA := connexionH2(t, a, 443+decPoste, caPoste); certA.VerifyHostname(b) == nil {
-		t.Error("le certificat propre à la stack a ne couvre qu'elle")
-	}
-}
-
-func TestHTTPSurP80(t *testing.T) {
-	statut, corps, _, err := demander("http", "admin."+pile("p-a")+".localhost", 80+decPoste, "/", nil)
-	attendu(t, "http sur p80", statut, corps, err, pile("p-a")+" front 8080")
-}
-
-func TestPassage(t *testing.T) {
-	statut, corps, cert, err := demander("https", pile("p-t")+".ancien.test", 443+decPoste, "/", caProjet)
-	attendu(t, "en passage, local", statut, corps, err, pile("p-t")+" front passage")
-	if cert == nil || cert.Issuer.CommonName != caProjetNom {
-		t.Errorf("en passage, la stack présente le certificat de son projet : %v", cert)
+	if _, certA := h2Conn(t, a, 443+workstationOffset, workstationCA); certA.VerifyHostname(b) == nil {
+		t.Error("stack a's own certificate covers only itself")
 	}
 }
 
-func TestRelais(t *testing.T) {
-	r := pile("s-r") + ".essai.test"
-	statut, corps, cert, err := demander("https", r, 443+decPoste, "/", caPoste)
-	attendu(t, "relais https, une connexion neuve", statut, corps, err, pile("s-r")+" front 8080")
-	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-poste") {
-		t.Errorf("le poste termine aussi les noms du serveur, avec sa propre autorité : %v", cert)
-	}
-	if !strings.Contains(corps, "proto=https") {
-		t.Errorf("la stack du serveur reçoit X-Forwarded-Proto du poste : %q", corps)
-	}
-	statut, corps, _, err = demander("https", r, 3000+decPoste, "/", caPoste)
-	attendu(t, "relais https, d'un port historique", statut, corps, err, pile("s-r")+" front 8081")
-	statut, corps, cert, err = demander("https", pile("s-q")+".ancien.test", 443+decPoste, "/", caProjet)
-	attendu(t, "relais en passage", statut, corps, err, pile("s-q")+" front passage")
-	if cert == nil || cert.Issuer.CommonName != caProjetNom {
-		t.Errorf("en passage, le certificat vient de la stack du serveur : %v", cert)
-	}
-	statut, corps, _, err = demander("http", pile("s-r")+".localhost", 80+decPoste, "/", nil)
-	attendu(t, "relais http", statut, corps, err, pile("s-r")+" front 8080")
-	statut, _, _, err = demander("https", "personne.essai.test", 443+decPoste, "/", caPoste)
-	if err != nil || statut != 404 {
-		t.Errorf("un nom inconnu partout : 404 du serveur ; obtenu %d %v", statut, err)
+func TestHTTPOnP80(t *testing.T) {
+	status, body, _, err := get("http", "admin."+stack("w-a")+".localhost", 80+workstationOffset, "/", nil)
+	expect(t, "http on p80", status, body, err, stack("w-a")+" front 8080")
+}
+
+func TestPassthrough(t *testing.T) {
+	status, body, cert, err := get("https", stack("w-t")+".legacy.test", 443+workstationOffset, "/", projectCA)
+	expect(t, "local passthrough", status, body, err, stack("w-t")+" front passthrough")
+	if cert == nil || cert.Issuer.CommonName != projectCAName {
+		t.Errorf("in passthrough, the stack presents its project's certificate: %v", cert)
 	}
 }
 
-func TestUnTelephoneSurLeServeur(t *testing.T) {
-	statut, corps, cert, err := demander("https", pile("s-r")+".essai.test", 443+decServeur, "/", caServeur)
-	attendu(t, "directement sur le serveur", statut, corps, err, pile("s-r")+" front 8080")
-	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-serveur") {
-		t.Errorf("le serveur présente un certificat de sa propre autorité : %v", cert)
+func TestRelays(t *testing.T) {
+	r := stack("s-r") + ".example.test"
+	status, body, cert, err := get("https", r, 443+workstationOffset, "/", workstationCA)
+	expect(t, "https relay, a fresh connection", status, body, err, stack("s-r")+" front 8080")
+	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-workstation") {
+		t.Errorf("the workstation also terminates the server's names, with its own authority: %v", cert)
 	}
-	// Le point d'entrée relais ne sert une route qu'au port d'entrée que le poste nomme
-	statut, _, _, _ = demander("http", pile("s-r")+".essai.test", 8080+decServeur, "/", nil)
-	if statut != 404 {
-		t.Errorf("sans X-Waggle-Port, le point d'entrée relais ne sert rien : %d", statut)
+	if !strings.Contains(body, "proto=https") {
+		t.Errorf("the server's stack receives the workstation's X-Forwarded-Proto: %q", body)
+	}
+	status, body, _, err = get("https", r, 3000+workstationOffset, "/", workstationCA)
+	expect(t, "https relay, from a legacy port", status, body, err, stack("s-r")+" front 8081")
+	status, body, cert, err = get("https", stack("s-q")+".legacy.test", 443+workstationOffset, "/", projectCA)
+	expect(t, "passthrough relay", status, body, err, stack("s-q")+" front passthrough")
+	if cert == nil || cert.Issuer.CommonName != projectCAName {
+		t.Errorf("in passthrough, the certificate comes from the server's stack: %v", cert)
+	}
+	status, body, _, err = get("http", stack("s-r")+".localhost", 80+workstationOffset, "/", nil)
+	expect(t, "http relay", status, body, err, stack("s-r")+" front 8080")
+	status, _, _, err = get("https", "nobody.example.test", 443+workstationOffset, "/", workstationCA)
+	if err != nil || status != 404 {
+		t.Errorf("a name unknown everywhere: 404 from the server; got %d %v", status, err)
 	}
 }
 
-func TestLeDNSDuVPN(t *testing.T) {
+func TestAPhoneOnTheServer(t *testing.T) {
+	status, body, cert, err := get("https", stack("s-r")+".example.test", 443+serverOffset, "/", serverCA)
+	expect(t, "straight to the server", status, body, err, stack("s-r")+" front 8080")
+	if cert == nil || !strings.HasPrefix(cert.Issuer.CommonName, "waggle "+id+"-server") {
+		t.Errorf("the server presents a certificate from its own authority: %v", cert)
+	}
+	// The relay entry point only serves a route for the entry port the workstation names
+	status, _, _, _ = get("http", stack("s-r")+".example.test", 8080+serverOffset, "/", nil)
+	if status != 404 {
+		t.Errorf("without X-Waggle-Port, the relay entry point serves nothing: %d", status)
+	}
+}
+
+func TestVPNDNS(t *testing.T) {
 	for _, proto := range []string{"udp", "tcp"} {
-		rcode, ips, err := interroger(proto, pile("s-r")+".essai.test", 1)
+		rcode, ips, err := query(proto, stack("s-r")+".example.test", 1)
 		if err != nil || rcode != 0 || len(ips) != 1 || ips[0] != "127.0.0.1" {
-			t.Errorf("%s, A : rcode %d, %v, %v ; attendu l'adresse de l'instance", proto, rcode, ips, err)
+			t.Errorf("%s, A: rcode %d, %v, %v; want the instance address", proto, rcode, ips, err)
 		}
-		rcode, ips, err = interroger(proto, pile("s-r")+".essai.test", 28)
+		rcode, ips, err = query(proto, stack("s-r")+".example.test", 28)
 		if err != nil || rcode != 0 || len(ips) != 0 {
-			t.Errorf("%s, AAAA : rcode %d, %v, %v ; attendu NOERROR et rien", proto, rcode, ips, err)
+			t.Errorf("%s, AAAA: rcode %d, %v, %v; want NOERROR and nothing", proto, rcode, ips, err)
 		}
 	}
-	rcode, ips, err := interroger("udp", "example.com", 1)
+	rcode, ips, err := query("udp", "example.com", 1)
 	if err != nil || rcode != 0 || len(ips) == 0 {
-		t.Errorf("le reste est relayé : rcode %d, %v, %v", rcode, ips, err)
+		t.Errorf("the rest is forwarded: rcode %d, %v, %v", rcode, ips, err)
 	}
 }
 
-func TestRefusEtRetrait(t *testing.T) {
-	sortie, _ := exec.Command("docker", "logs", "waggle-"+id+"-poste-controleur-1").CombinedOutput()
-	if !bytes.Contains(sortie, []byte("ne porte pas {dossier}")) {
-		t.Errorf("la route pirate est refusée, et dite :\n%s", sortie)
+func TestRefusalAndRemoval(t *testing.T) {
+	out, _ := exec.Command("docker", "logs", "waggle-"+id+"-workstation-controller-1").CombinedOutput()
+	if !bytes.Contains(out, []byte("does not carry {stack}")) {
+		t.Errorf("the intruder route is refused, and reported:\n%s", out)
 	}
-	statut, _, _, _ := demander("https", "pirate.essai.test", 443+decPoste, "/", caPoste)
-	if statut == 200 {
-		t.Error("la route pirate ne sert rien")
+	status, _, _, _ := get("https", "intruder.example.test", 443+workstationOffset, "/", workstationCA)
+	if status == 200 {
+		t.Error("the intruder route serves nothing")
 	}
-	b := pile("p-b")
-	if _, err := lancer(nil, "docker", "compose", "-f", filepath.Join(dossier, b, "compose.yaml"), "down"); err != nil {
+	b := stack("w-b")
+	if _, err := run(nil, "docker", "compose", "-f", filepath.Join(dir, b, "compose.yaml"), "down"); err != nil {
 		t.Fatal(err)
 	}
-	err := attendre(func() error {
-		statut, _, _, _ := demander("https", b+".essai.test", 443+decPoste, "/", caPoste)
-		if statut != 404 {
-			return fmt.Errorf("%d", statut)
+	err := waitFor(func() error {
+		status, _, _, _ := get("https", b+".example.test", 443+workstationOffset, "/", workstationCA)
+		if status != 404 {
+			return fmt.Errorf("%d", status)
 		}
 		return nil
 	}, 20*time.Second)
 	if err != nil {
-		t.Errorf("une stack retirée perd sa route, et son nom part au relais : %v", err)
+		t.Errorf("a removed stack loses its route, and its name goes to the relay: %v", err)
 	}
 }
 
-func TestRelancer(t *testing.T) {
-	avant, _ := lancer(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-poste")
-	if _, err := waggle("installer"); err != nil {
+func TestRunAgain(t *testing.T) {
+	before, _ := run(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-workstation")
+	if _, err := waggle("install"); err != nil {
 		t.Fatal(err)
 	}
-	apres, _ := lancer(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-poste")
-	if avant != apres {
-		t.Errorf("relancer l'installation ne recrée rien :\n%s\n%s", avant, apres)
+	after, _ := run(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-workstation")
+	if before != after {
+		t.Errorf("running install again recreates nothing:\n%s\n%s", before, after)
 	}
-	if _, err := lancer(nil, "docker", "restart", "waggle-"+id+"-poste-controleur-1"); err != nil {
+	if _, err := run(nil, "docker", "restart", "waggle-"+id+"-workstation-controller-1"); err != nil {
 		t.Fatal(err)
 	}
-	statut, corps, _, err := demander("https", pile("p-a")+".essai.test", 443+decPoste, "/", caPoste)
-	attendu(t, "le contrôleur redémarré, les routes tiennent", statut, corps, err, pile("p-a")+" front")
+	status, body, _, err := get("https", stack("w-a")+".example.test", 443+workstationOffset, "/", workstationCA)
+	expect(t, "controller restarted, routes hold", status, body, err, stack("w-a")+" front")
 }
 
-// interroger pose une question DNS au DNS du serveur, et rend le code de réponse et les adresses.
-func interroger(proto, nom string, qtype uint16) (int, []string, error) {
+// query asks the server's DNS a question, and returns the response code and the addresses.
+func query(proto, name string, qtype uint16) (int, []string, error) {
 	var q bytes.Buffer
 	binary.Write(&q, binary.BigEndian, []uint16{0x1234, 0x0100, 1, 0, 0, 0})
-	for _, l := range strings.Split(nom, ".") {
+	for _, l := range strings.Split(name, ".") {
 		q.WriteByte(byte(len(l)))
 		q.WriteString(l)
 	}
 	q.WriteByte(0)
 	binary.Write(&q, binary.BigEndian, []uint16{qtype, 1})
-	conn, err := net.DialTimeout(proto, net.JoinHostPort(hote, strconv.Itoa(53+decServeur)), 3*time.Second)
+	conn, err := net.DialTimeout(proto, net.JoinHostPort(host, strconv.Itoa(53+serverOffset)), 3*time.Second)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	message := q.Bytes()
+	msg := q.Bytes()
 	if proto == "tcp" {
-		message = append(binary.BigEndian.AppendUint16(nil, uint16(len(message))), message...)
+		msg = append(binary.BigEndian.AppendUint16(nil, uint16(len(msg))), msg...)
 	}
-	if _, err := conn.Write(message); err != nil {
+	if _, err := conn.Write(msg); err != nil {
 		return 0, nil, err
 	}
-	rep := make([]byte, 4096)
-	n, err := io.ReadAtLeast(conn, rep, 12)
+	resp := make([]byte, 4096)
+	n, err := io.ReadAtLeast(conn, resp, 12)
 	if err != nil {
 		return 0, nil, err
 	}
-	rep = rep[:n]
+	resp = resp[:n]
 	if proto == "tcp" {
-		rep = rep[2:]
+		resp = resp[2:]
 	}
-	rcode := int(rep[3] & 0x0f)
-	qd, an := binary.BigEndian.Uint16(rep[4:]), binary.BigEndian.Uint16(rep[6:])
+	rcode := int(resp[3] & 0x0f)
+	qd, an := binary.BigEndian.Uint16(resp[4:]), binary.BigEndian.Uint16(resp[6:])
 	i := 12
 	for ; qd > 0; qd-- {
-		i = sauterNom(rep, i) + 4
+		i = skipName(resp, i) + 4
 	}
 	var ips []string
 	for ; an > 0; an-- {
-		i = sauterNom(rep, i)
-		typ, longueur := binary.BigEndian.Uint16(rep[i:]), int(binary.BigEndian.Uint16(rep[i+8:]))
+		i = skipName(resp, i)
+		typ, length := binary.BigEndian.Uint16(resp[i:]), int(binary.BigEndian.Uint16(resp[i+8:]))
 		i += 10
-		if typ == 1 && longueur == 4 {
-			ips = append(ips, net.IP(rep[i:i+4]).String())
+		if typ == 1 && length == 4 {
+			ips = append(ips, net.IP(resp[i:i+4]).String())
 		}
-		if typ == 28 && longueur == 16 {
-			ips = append(ips, net.IP(rep[i:i+16]).String())
+		if typ == 28 && length == 16 {
+			ips = append(ips, net.IP(resp[i:i+16]).String())
 		}
-		i += longueur
+		i += length
 	}
 	return rcode, ips, nil
 }
 
-func sauterNom(m []byte, i int) int {
+func skipName(m []byte, i int) int {
 	for i < len(m) {
 		switch l := int(m[i]); {
 		case l == 0:

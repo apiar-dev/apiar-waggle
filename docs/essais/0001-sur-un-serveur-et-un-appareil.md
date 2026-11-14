@@ -1,16 +1,16 @@
 # Les essais qui demandent un serveur ou un appareil
 
 Ces essais ne se font pas sur un Mac seul. Ils sont préparés ici, à lancer à la main, une fois
-waggle installé (`bin/waggle installer`). Chacun dit ce qu'il établit, comment le lancer, et
+waggle installé (`bin/waggle install`). Chacun dit ce qu'il établit, comment le lancer, et
 ce qu'on attend.
 
-Ce qu'un Mac seul pouvait éprouver l'est déjà, par `make integration` et `make pare-feu`. En
-particulier, la règle de pare-feu, posée par la vraie commande `waggle pare-feu`, a été
+Ce qu'un Mac seul pouvait éprouver l'est déjà, par `make integration` et `make firewall`. En
+particulier, la règle de pare-feu, posée par la vraie commande `waggle firewall`, a été
 éprouvée dans un Docker-in-Docker.
 
 Les adresses sont celles d'un exemple, à adapter :
 - un serveur dont l'interface WireGuard `wg0` porte `10.8.0.1`, avec une instance de waggle
-  sur cette adresse, nommée ici `equipe` ;
+  sur cette adresse, nommée ici `team` ;
 - un Mac, membre du tunnel en `10.8.0.2`.
 
 ## 1. La règle `DOCKER-USER`, sur le vrai serveur, vérifiée hors du tunnel
@@ -28,7 +28,7 @@ machine du réseau privé de l'hébergeur : `ip route add 10.8.0.1/32 via <adres
 Sur le serveur, en root :
 
 ```bash
-VPN=10.8.0.1 WG=wg0 INSTANCE=equipe
+VPN=10.8.0.1 WG=wg0 INSTANCE=team
 ip netns add waggle-dehors
 ip link add waggle-h type veth peer name waggle-d
 ip link set waggle-d netns waggle-dehors
@@ -44,13 +44,13 @@ Puis, dans l'ordre :
 | La règle de waggle | `iptables -S DOCKER-USER \| grep ctorigdst` | la règle, avec `--ctdir ORIGINAL` |
 | Le voisin | `dehors` | `000` |
 | Le Mac, tunnel actif | `curl -s -m 3 -o /dev/null -w '%{http_code}\n' http://10.8.0.1/` | `404` : Traefik répond, aucune route sans nom |
-| Sans la règle | `docker stop waggle-$INSTANCE-pare-feu-1`, puis `iptables -D DOCKER-USER -m conntrack --ctorigdst $VPN --ctdir ORIGINAL ! -i $WG -j DROP`, puis `dehors` | `404` : c'est la fuite que la règle ferme. Avec `000`, Docker ferme déjà ce chemin sur ce serveur, et la règle reste en défense |
-| La règle reposée | `docker start waggle-$INSTANCE-pare-feu-1`, puis `dehors` | `000` |
-| Docker redémarré | `systemctl restart docker`, une minute, puis `dehors` | `000` : le service `pare-feu` redémarre avec Docker et repose la règle |
+| Sans la règle | `docker stop waggle-$INSTANCE-firewall-1`, puis `iptables -D DOCKER-USER -m conntrack --ctorigdst $VPN --ctdir ORIGINAL ! -i $WG -j DROP`, puis `dehors` | `404` : c'est la fuite que la règle ferme. Avec `000`, Docker ferme déjà ce chemin sur ce serveur, et la règle reste en défense |
+| La règle reposée | `docker start waggle-$INSTANCE-firewall-1`, puis `dehors` | `000` |
+| Docker redémarré | `systemctl restart docker`, une minute, puis `dehors` | `000` : le service `firewall` redémarre avec Docker et repose la règle |
 | Le serveur redémarré | `reboot`, puis la même vérification | `000` |
 
 À noter : le délai entre le démarrage de Docker et la règle reposée, d'après le journal
-(`docker logs waggle-$INSTANCE-pare-feu-1`).
+(`docker logs waggle-$INSTANCE-firewall-1`).
 
 Le retrait du voisin :
 
@@ -64,7 +64,7 @@ ip netns del waggle-dehors; ip link del waggle-h 2>/dev/null
 
 Sur le serveur : `ss -lunpt | grep ':53 '`. Il est attendu que seul `systemd-resolved` y
 écoute, sur `127.0.0.53` et `127.0.0.54`. Un service à l'écoute sur `0.0.0.0:53` empêcherait
-la publication, et `bin/waggle installer` le dirait.
+la publication, et `bin/waggle install` le dirait.
 
 Puis, depuis le Mac, tunnel actif : `dig +short @10.8.0.1 <dossier>.<domaine du DNS>`. Attendu :
 `10.8.0.1`.
@@ -125,7 +125,7 @@ décision 5). L'app WireGuard de macOS n'en active peut-être qu'un à la fois.
 VPN (ADR-0001, décisions 6 et 8 ; ADR-0002, décision 2). L'autorité de waggle est en X.509 v3,
 `CA:TRUE` ; ses certificats durent 397 jours, en ECDSA P-256.
 
-L'autorité de l'instance s'obtient par `bin/waggle autorite equipe > autorite.crt`, sur le
+L'autorité de l'instance s'obtient par `bin/waggle ca team > ca.crt`, sur le
 serveur.
 
 **Android** (le Pixel) :
@@ -142,7 +142,7 @@ serveur.
 5. Facultatif : Firefox, avec « Utiliser les certificats d'autorité tiers » activé.
 
 **iOS** :
-1. Envoyer `autorite.crt` à l'iPhone (AirDrop ou courriel), puis l'installer : Réglages →
+1. Envoyer `ca.crt` à l'iPhone (AirDrop ou courriel), puis l'installer : Réglages →
    Profil téléchargé.
 2. Réglages → Général → Informations → Réglages de confiance des certificats : activer
    l'autorité.

@@ -1,2 +1,2 @@
-# Les dossiers des essais d'intégration, retirés à la fin de chaque essai
-/.essais/
+# Integration test directories, removed at the end of each run
+/.tests/

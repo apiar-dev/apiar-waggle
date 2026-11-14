@@ -2,6 +2,8 @@
 
 **Statut** : **Accepté** (2026-11-14), par Benjamin.
 **Amende** l'ADR-0001, décisions 2, 3 et 5.
+**Identifiants** : en anglais, comme tout ce qui se configure (`waggle.project`, `{stack}`, le point
+d'entrée `relay`) *(Benjamin, 2026-11-14)*.
 **Zone** : ce qu'un projet déclare à waggle, et où se termine le TLS.
 
 ## Contexte
@@ -73,28 +75,28 @@ rythme, par leur propre décision. *(Tranché avec Benjamin, 2026-11-14.)*
    - Chaque service routé porte ses routes, en étiquettes de waggle, et non plus de Traefik.
      Elles voyagent avec le conteneur, et waggle les lit par l'API de Docker, sans accès au
      dossier du projet *(tranché avec Benjamin, 2026-11-14)*. Une route est une URL et le
-     port du service. `{dossier}` y désigne le nom de la stack. Une esquisse, arrêtée au plan
+     port du service. `{stack}` y désigne le nom de la stack. Une esquisse, arrêtée au plan
      d'implémentation :
 
      ```yaml
      app:
        labels:
-         waggle.projet: mon-projet
+         waggle.project: my-project
          waggle.routes: |
-           https://{dossier}.dev.exemple.fr/      8080
-           https://{dossier}.dev.exemple.fr:3000/ 5173
+           https://{stack}.dev.exemple.fr/      8080
+           https://{stack}.dev.exemple.fr:3000/ 5173
      api:
        labels:
-         waggle.projet: mon-projet
-         waggle.routes: https://{dossier}.dev.exemple.fr/api 8000
+         waggle.project: my-project
+         waggle.routes: https://{stack}.dev.exemple.fr/api 8000
      ```
 
    - **Le schéma de l'URL dit le mode** :
      - `https://` : waggle termine le TLS, et route par hôte et par chemin ;
-     - `http://` : sur `p80`, comme aujourd'hui (`http://admin.{dossier}.localhost/`) ;
+     - `http://` : sur `p80`, comme aujourd'hui (`http://admin.{stack}.localhost/`) ;
      - `tls://` : le passage, routé par le SNI, d'un projet qui termine son TLS (décision 4).
-   - **Un hôte joker** (`https://*.{dossier}.dev.exemple.fr/`) sert une famille d'hôtes.
-   - **waggle refuse une route dont l'hôte ne porte pas `{dossier}`** : une stack ne peut pas
+   - **Un hôte joker** (`https://*.{stack}.dev.exemple.fr/`) sert une famille d'hôtes.
+   - **waggle refuse une route dont l'hôte ne porte pas `{stack}`** : une stack ne peut pas
      prendre le nom d'une autre.
    - **Le compagnon devient le traducteur.** À chaque service qui démarre, il le branche, lit
      ses routes et les écrit dans la configuration de Traefik, qui la relit d'elle-même. Le
@@ -121,7 +123,7 @@ rythme, par leur propre décision. *(Tranché avec Benjamin, 2026-11-14.)*
 3. **Le relais suit le mode de chaque domaine.**
    - **Pour un domaine terminé par waggle**, le poste termine le TLS avec sa propre autorité,
      y compris pour les noms du serveur, et relaie en HTTP, requête par requête.
-     - Le relais vise un point d'entrée `relais` du serveur, en HTTP, sur l'adresse du VPN :
+     - Le relais vise un point d'entrée `relay` du serveur, en HTTP, sur l'adresse du VPN :
        le tunnel chiffre.
      - Ce point d'entrée ne croit les en-têtes `X-Forwarded-*` que des adresses du VPN.
      - Le poste n'a qu'une autorité à approuver. Une même connexion porte des noms locaux et
@@ -143,7 +145,7 @@ rythme, par leur propre décision. *(Tranché avec Benjamin, 2026-11-14.)*
 5. **L'isolement par VPN de l'ADR-0001 ne change pas.**
    - Toujours une instance par VPN, la règle de pare-feu par adresse, et un DNS du VPN.
    - S'y ajoute une autorité par instance (décision 2).
-   - Le point d'entrée `relais` du serveur est publié sur l'adresse du VPN : la même règle
+   - Le point d'entrée `relay` du serveur est publié sur l'adresse du VPN : la même règle
      le ferme au reste.
 
 ## Les essais
@@ -171,7 +173,7 @@ proxies qui tournent sur le poste n'ont rien lu.
 | Un port historique terminé par waggle (`p3000`) | servi par le port du service ; un nom sans route sur ce port reçoit un 404 |
 | Le websocket de Vite 8.3.8, Vite en HTTP derrière waggle, qui termine le TLS | client et jeton servis, `101`, `connected`, puis `full-reload` quand `main.js` change. Aucun réglage du HMR : seul `allowedHosts` |
 | Le websocket sur HTTP/2 (RFC 8441) | non annoncé par Traefik : un navigateur ouvre une connexion HTTP/1.1 pour le websocket, celle de l'essai ci-dessus |
-| Relais : un nom du serveur, une connexion neuve vers le poste | le poste présente son certificat, relaie en HTTP au point d'entrée `relais` du serveur, et l'application reçoit `X-Forwarded-Proto: https` |
+| Relais : un nom du serveur, une connexion neuve vers le poste | le poste présente son certificat, relaie en HTTP au point d'entrée `relay` du serveur, et l'application reçoit `X-Forwarded-Proto: https` |
 | Relais : une connexion ouverte pour un nom local, réutilisée pour un nom du serveur | servi par le serveur, sur la même connexion |
 | Un téléphone, directement sur le serveur | le serveur présente son propre certificat et sert la stack |
 | Deux modes sur le même 443 du poste : un nom en passage local, un nom en passage relayé par domaine | chacun servi, avec le certificat de l'autorité du projet |
