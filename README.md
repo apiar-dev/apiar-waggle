@@ -15,38 +15,67 @@ Le plan de cet incrément : [`docs/plans/increment-1.md`](docs/plans/increment-1
 
 ## Installer waggle sur une machine
 
-Il ne faut que Docker : Docker Desktop sur un Mac, Docker Engine sur un serveur Linux. Pour l'instant, waggle s'installe
-depuis ce dépôt, cloné une fois par machine, avec la commande `waggle` liée dans un dossier du `PATH` :
+Il faut Docker (Docker Desktop sur un Mac, Docker Engine sur un serveur Linux), git, et `gh`, connecté à un compte qui
+peut lire ce dépôt : il est privé. Puis, sur un Mac comme sur un serveur :
 
 ```bash
-git clone https://github.com/apiar-dev/apiar-waggle.git ~/.local/share/waggle
+gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
 ```
+
+Le script, [`install.sh`](install.sh) :
+1. vérifie git, `gh` et Docker ;
+2. clone ce dépôt dans `~/.local/share/waggle`. Chaque machine y construit l'image de waggle ;
+3. lie la commande dans `~/.local/bin/waggle`. Si ce dossier n'est pas dans le `PATH`, il affiche la ligne à ajouter au
+   fichier du shell, sans y toucher lui-même ;
+4. sur un Mac, écrit la configuration du poste s'il n'y en a pas, lève l'instance (`waggle up`) et approuve son autorité
+   dans le trousseau. macOS demande alors le mot de passe de la session, une seule fois ;
+5. sur Linux, s'arrête à la configuration s'il n'y en a pas : celle d'un serveur s'écrit à la main (§ « Sur un
+   serveur »). Une fois qu'elle est écrite, relancer le script lève les instances.
+
+**Mettre à jour, c'est relancer la même commande.**
+- Le script amène le clone à la dernière version de `main`, puis reconstruit l'image.
+- Compose ne recrée que les conteneurs dont l'image a changé : le contrôleur, pas Traefik.
+- Un clone modifié à la main est refusé, plutôt qu'écrasé.
+
+Les réglages du script :
+- `WAGGLE_REF`, une branche ou une étiquette, `main` par défaut ;
+- `WAGGLE_HOME`, `WAGGLE_BIN` et `WAGGLE_CONFIG`, ses dossiers et son fichier de configuration ;
+- `WAGGLE_NO_TRUST=1`, pour laisser le trousseau tranquille.
+
+Pour essayer une branche :
 
 ```bash
-ln -s ~/.local/share/waggle/bin/waggle ~/.local/bin/waggle
+gh api 'repos/apiar-dev/apiar-waggle/contents/install.sh?ref=increment-1' -H 'Accept: application/vnd.github.raw+json' | WAGGLE_REF=increment-1 sh
 ```
 
-- `waggle` construit son image depuis le clone au premier lancement, puis à chaque mise à jour ; le cache de Docker rend
-  les lancements suivants instantanés.
-- Mettre à jour : `git -C ~/.local/share/waggle pull`, puis `waggle install`.
-- Le dépôt est privé : il faut y avoir accès pour le cloner.
-- Les commandes `make` n'ont rien à voir avec l'installation. Elles ne servent qu'à développer waggle, et se lancent dans
-  ce dépôt (§ « Développer waggle »).
+Pour retirer waggle : `waggle uninstall --all`, puis supprimer `~/.local/bin/waggle` et `~/.local/share/waggle`.
+
+Les commandes `make` n'ont rien à voir avec l'installation. Elles ne servent qu'à développer waggle, et se lancent dans ce
+dépôt (§ « Développer waggle »).
+
+## Les commandes
+
+| Commande | Ce qu'elle fait |
+| --- | --- |
+| `waggle up` | lit la configuration, écrit et lève chaque instance. Relancée, elle ne change que ce qui a changé |
+| `waggle down` | arrête et retire les conteneurs des instances ; leur autorité et leur configuration restent |
+| `waggle uninstall [--all]` | retire les instances et leurs volumes ; `--all` retire aussi leur autorité |
+| `waggle status` | les conteneurs de chaque instance, et son autorité |
+| `waggle ca [instance]` | le certificat de l'autorité d'une instance, à passer à un appareil |
+| `waggle trust [instance]` | sur un Mac, approuve l'autorité dans le trousseau, sauf si elle l'est déjà |
+
+Le journal du contrôleur dit chaque route servie, retirée ou refusée : `docker logs -f waggle-workstation-controller-1`.
 
 ## Sur un poste
 
-1. La configuration : copier [`config.example.yaml`](config.example.yaml) dans `~/.config/waggle/config.yaml`. Pour un
-   poste seul, l'instance `workstation` sur `127.0.0.1` suffit.
-2. Les ports 80 et 443 de `127.0.0.1` doivent être libres : arrêter d'abord le proxy « du poste » d'un projet qui n'a pas
-   encore migré.
-3. `waggle install`. Relancé, il ne change que ce qui a changé.
-4. Approuver l'autorité du poste, une fois : `waggle trust`.
-   - macOS l'ajoute au trousseau de session, approuvée pour le TLS, et demande le mot de passe de la session.
-   - Safari et Chrome la lisent là. Si Firefox ne la voit pas : dans `about:config`, régler
-     `security.enterprise_roots.enabled` sur `true`.
-
-`waggle status` montre les conteneurs de chaque instance. Le journal du contrôleur dit chaque route servie, retirée ou
-refusée : `docker logs -f waggle-workstation-controller-1`.
+- Les ports 80 et 443 de `127.0.0.1` doivent être libres : arrêter d'abord le proxy « du poste » d'un projet qui n'a pas
+  encore migré. Sinon `waggle up` échoue : il suffit de relancer le script une fois les ports libérés.
+- La configuration que le script écrit est [`config.example.yaml`](config.example.yaml), copié dans
+  `~/.config/waggle/config.yaml` : l'instance `workstation`, sur `127.0.0.1`, suffit à un poste seul. Pour y ajouter des
+  ports ou des relais : modifier le fichier, puis `waggle up`.
+- L'autorité approuvée, Safari et Chrome la lisent dans le trousseau. Si Firefox ne la voit pas : dans `about:config`,
+  régler `security.enterprise_roots.enabled` sur `true`.
+- Sur un poste Linux, l'exemple convient tel quel : le copier, puis relancer le script.
 
 ## Sur un serveur
 
@@ -54,6 +83,8 @@ refusée : `docker logs -f waggle-workstation-controller-1`.
   refuse toute adresse qui n'est ni la boucle locale ni celle d'une interface WireGuard.
 - Une instance par VPN, chacune avec la liste de ses projets (`projects`). Deux VPN ne voient jamais les stacks l'un de
   l'autre.
+- La configuration s'écrit à la main : copier [`config.example.yaml`](config.example.yaml) dans
+  `~/.config/waggle/config.yaml`, et y décrire une instance par VPN. Puis relancer le script, ou `waggle up`.
 - Le pare-feu se pose seul.
   - Le service `firewall` de chaque instance pose la règle qui ferme l'adresse du VPN à tout ce qui n'entre pas par son
     interface :

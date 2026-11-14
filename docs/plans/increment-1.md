@@ -2,7 +2,8 @@
 
 ## Ce que l'increment obtient
 
-waggle s'installe sur une machine, Mac ou serveur, d'une seule commande, `bin/waggle install`.
+waggle s'installe sur une machine, Mac ou serveur, d'une seule commande, `install.sh`, et lève ses instances par
+`waggle up`.
 Il sert les stacks des projets d'après les routes qu'elles déclarent :
 - en HTTPS terminé par waggle ;
 - en HTTP sur `p80` ;
