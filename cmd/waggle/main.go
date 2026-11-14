@@ -192,6 +192,9 @@ func summarize(inst *config.Instance, dir string) {
 		}
 	}
 	fmt.Printf("waggle: instance %s listens on %s, ports %s\n", inst.Name, inst.Address, strings.Join(ports, ", "))
+	if inst.Loopback {
+		fmt.Printf("  and on %s, for this machine's own browsers and agents\n", config.LoopbackAddress)
+	}
 	if len(inst.DNS) > 0 {
 		fmt.Printf("  VPN DNS, on %s:%d, for %s\n", inst.Address, 53+inst.PortOffset, strings.Join(inst.DNS, ", "))
 	}
@@ -261,7 +264,11 @@ func status() error {
 	}
 	for _, inst := range insts {
 		dir := filepath.Join(state, inst.Name)
-		fmt.Printf("== instance %s, on %s\n", inst.Name, inst.Address)
+		on := inst.Address
+		if inst.Loopback {
+			on += " and " + config.LoopbackAddress
+		}
+		fmt.Printf("== instance %s, on %s\n", inst.Name, on)
 		if _, err := os.Stat(filepath.Join(dir, "compose.json")); err != nil {
 			fmt.Println("  not started (waggle up)")
 			continue

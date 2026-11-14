@@ -72,6 +72,19 @@ func TestServer(t *testing.T) {
 	if !slices.Contains(strs(s["traefik"]["ports"]), "10.8.0.1:8080:8080") {
 		t.Error("the relay listener is published on the VPN address")
 	}
+	if slices.Contains(strs(s["traefik"]["ports"]), "127.0.0.1:443:443") {
+		t.Error("without loopback: true, a server publishes nothing on loopback")
+	}
+	inst.Loopback = true
+	looped := strs(services(t, Compose(inst, "/state/team", "waggle:local", nil))["traefik"]["ports"])
+	for _, want := range []string{"10.8.0.1:443:443", "127.0.0.1:80:80", "127.0.0.1:443:443"} {
+		if !slices.Contains(looped, want) {
+			t.Errorf("with loopback: true, %s is published: %v", want, looped)
+		}
+	}
+	if slices.Contains(looped, "127.0.0.1:8080:8080") {
+		t.Errorf("the relay listener stays on the VPN address: %v", looped)
+	}
 	args := TraefikArgs(inst)
 	if !slices.Contains(args, "--entrypoints.relay.forwardedHeaders.trustedIPs=10.8.0.0/24") {
 		t.Errorf("the relay listener only trusts the VPN: %v", args)

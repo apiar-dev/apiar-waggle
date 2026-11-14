@@ -19,6 +19,7 @@ instances:
   # A SERVER: one instance per VPN, on its WireGuard address. The interface is deduced from it, and the firewall rule too.
   # team:
   #   address: 10.8.0.1
+  #   loopback: true                    # also on 127.0.0.1, for this server's own agents; one instance per machine
   #   projects: [my-project]            # with several instances, each one lists its projects
   #   dns: [dev.example.com]            # the VPN DNS, for phones
   # clients:

@@ -51,6 +51,10 @@ func Compose(inst *config.Instance, dir, image string, hashes map[string]string)
 	for _, p := range inst.PublishedPorts() {
 		ports = append(ports, fmt.Sprintf("%s:%d:%d", inst.Address, p+inst.PortOffset, p))
 	}
+	// A server also serves its own machine, whose agents test the URLs of its stacks (ADR-0003)
+	for _, p := range inst.LoopbackPorts() {
+		ports = append(ports, fmt.Sprintf("%s:%d:%d", config.LoopbackAddress, p+inst.PortOffset, p))
+	}
 	services := object{
 		"traefik": object{
 			"image":    TraefikImage,

@@ -30,6 +30,7 @@ type File struct {
 type Instance struct {
 	Name          string         `yaml:"-" json:"name"`
 	Address       string         `yaml:"address" json:"address"`
+	Loopback      bool           `yaml:"loopback,omitempty" json:"loopback,omitempty"`
 	Interface     string         `yaml:"interface,omitempty" json:"interface,omitempty"`
 	Projects      []string       `yaml:"projects,omitempty" json:"projects,omitempty"`
 	Ports         []int          `yaml:"ports,omitempty" json:"ports,omitempty"`
@@ -150,6 +151,9 @@ func validateInstance(inst *Instance, osName string, links []Link) []error {
 		if inst.Interface != "" {
 			fail("a loopback address has no interface to name")
 		}
+		if inst.Loopback {
+			fail("loopback: true is for a server instance; %s already is loopback", inst.Address)
+		}
 	case osName != "Linux":
 		fail("on %s, waggle only listens on loopback: %s refused", osLabel(osName), inst.Address)
 	default:
@@ -263,6 +267,13 @@ func validateTogether(instances []*Instance) []error {
 			errs = append(errs, fmt.Errorf("instances %s and %s listen on the same address, %s", other, inst.Name, inst.Address))
 		}
 		addresses[key] = inst.Name
+		if inst.Loopback {
+			key := fmt.Sprintf("%s+%d", LoopbackAddress, inst.PortOffset)
+			if other, ok := addresses[key]; ok {
+				errs = append(errs, fmt.Errorf("instances %s and %s both listen on %s: one instance per machine serves its loopback", other, inst.Name, LoopbackAddress))
+			}
+			addresses[key] = inst.Name
+		}
 	}
 	if withoutProjects > 0 && len(instances) > 1 {
 		errs = append(errs, errors.New("with several instances, each one lists its projects (projects): an instance without a list would read them all"))
@@ -318,6 +329,19 @@ func (inst *Instance) PublishedPorts() []int {
 		ports = append(ports, inst.RelayListener.Port)
 	}
 	return ports
+}
+
+// LoopbackAddress is where a machine's own browsers and agents reach its stacks.
+const LoopbackAddress = "127.0.0.1"
+
+// LoopbackPorts are the ports a server instance with loopback: true also publishes on 127.0.0.1, so that the machine's own
+// agents reach its stacks under their URLs (ADR-0003): the stacks' entry points, not the relay listener, which only
+// workstations reach, through the VPN.
+func (inst *Instance) LoopbackPorts() []int {
+	if !inst.Loopback {
+		return nil
+	}
+	return append([]int{80}, inst.TLSPorts()...)
 }
 
 // InCatalog tells whether a TLS port is an entry point of the instance.

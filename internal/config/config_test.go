@@ -102,6 +102,32 @@ instances:
 	}
 }
 
+// A server instance also serves its own machine on loopback, for its agents (ADR-0003). One instance per machine does.
+func TestLoopback(t *testing.T) {
+	h := server(link("wg0", true, "10.8.0.1/24"), link("wg1", true, "10.9.0.1/24"))
+	insts, err := validate(t, "instances:\n  team:\n    address: 10.8.0.1\n    loopback: true\n", h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := insts[0].LoopbackPorts(); len(got) != 2 || got[0] != 80 || got[1] != 443 {
+		t.Errorf("on loopback, the stacks' entry points only, not the relay listener: %v", got)
+	}
+	_, err = validate(t, "instances:\n  workstation:\n    address: 127.0.0.1\n    loopback: true\n", mac)
+	wantError(t, err, "for a server instance")
+	_, err = validate(t, `
+instances:
+  team: {address: 10.8.0.1, loopback: true, projects: [p]}
+  clients: {address: 10.9.0.1, loopback: true, projects: [q]}
+`, h)
+	wantError(t, err, "one instance per machine serves its loopback")
+	_, err = validate(t, `
+instances:
+  team: {address: 10.8.0.1, loopback: true, projects: [p]}
+  local: {address: 127.0.0.1, projects: [q]}
+`, h)
+	wantError(t, err, "one instance per machine serves its loopback")
+}
+
 func TestIsolation(t *testing.T) {
 	h := server(link("wg0", true, "10.8.0.1/24"), link("wg1", true, "10.9.0.1/24"))
 	_, err := validate(t, `
