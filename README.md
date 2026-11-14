@@ -13,10 +13,25 @@ Les décisions sont dans [`docs/adr/`](docs/adr/) :
 
 Le plan de cet incrément : [`docs/plans/increment-1.md`](docs/plans/increment-1.md).
 
-## Ce qu'il faut
+## Installer waggle sur une machine
 
-Docker, et rien d'autre : Docker Desktop sur un Mac, Docker Engine sur un serveur Linux. `bin/waggle` construit l'image de
-waggle depuis ce dépôt, puis y lance chaque commande.
+Il ne faut que Docker : Docker Desktop sur un Mac, Docker Engine sur un serveur Linux. Pour l'instant, waggle s'installe
+depuis ce dépôt, cloné une fois par machine, avec la commande `waggle` liée dans un dossier du `PATH` :
+
+```bash
+git clone https://github.com/apiar-dev/apiar-waggle.git ~/.local/share/waggle
+```
+
+```bash
+ln -s ~/.local/share/waggle/bin/waggle ~/.local/bin/waggle
+```
+
+- `waggle` construit son image depuis le clone au premier lancement, puis à chaque mise à jour ; le cache de Docker rend
+  les lancements suivants instantanés.
+- Mettre à jour : `git -C ~/.local/share/waggle pull`, puis `waggle install`.
+- Le dépôt est privé : il faut y avoir accès pour le cloner.
+- Les commandes `make` n'ont rien à voir avec l'installation. Elles ne servent qu'à développer waggle, et se lancent dans
+  ce dépôt (§ « Développer waggle »).
 
 ## Sur un poste
 
@@ -24,13 +39,13 @@ waggle depuis ce dépôt, puis y lance chaque commande.
    poste seul, l'instance `workstation` sur `127.0.0.1` suffit.
 2. Les ports 80 et 443 de `127.0.0.1` doivent être libres : arrêter d'abord le proxy « du poste » d'un projet qui n'a pas
    encore migré.
-3. `bin/waggle install`. Relancé, il ne change que ce qui a changé.
-4. Approuver l'autorité du poste, une fois : `bin/waggle trust`.
+3. `waggle install`. Relancé, il ne change que ce qui a changé.
+4. Approuver l'autorité du poste, une fois : `waggle trust`.
    - macOS l'ajoute au trousseau de session, approuvée pour le TLS, et demande le mot de passe de la session.
    - Safari et Chrome la lisent là. Si Firefox ne la voit pas : dans `about:config`, régler
      `security.enterprise_roots.enabled` sur `true`.
 
-`bin/waggle status` montre les conteneurs de chaque instance. Le journal du contrôleur dit chaque route servie, retirée ou
+`waggle status` montre les conteneurs de chaque instance. Le journal du contrôleur dit chaque route servie, retirée ou
 refusée : `docker logs -f waggle-workstation-controller-1`.
 
 ## Sur un serveur
@@ -110,8 +125,8 @@ services:
   - un joker par domaine ;
   - un certificat propre à une stack qui a des noms à deux labels (`api.<stack>.<domaine>`).
 - Chaque certificat dure 397 jours, et se renouvelle seul à 30 jours de son terme.
-- `bin/waggle ca [instance]` écrit le certificat de l'autorité, à passer à un appareil.
-- `bin/waggle uninstall --all` retire l'autorité avec le reste. Les appareils qui l'approuvaient ne la reconnaîtront
+- `waggle ca [instance]` écrit le certificat de l'autorité, à passer à un appareil.
+- `waggle uninstall --all` retire l'autorité avec le reste. Les appareils qui l'approuvaient ne la reconnaîtront
   plus.
 
 ## Un téléphone
@@ -138,7 +153,7 @@ Les chemins des menus et le comportement du DNS privé d'Android restent à cons
 
 ## Développer waggle
 
-Ces commandes ne servent qu'à qui modifie waggle ; pour l'utiliser, `bin/waggle` suffit. Elles tournent toutes dans
+Ces commandes ne servent qu'à qui modifie waggle ; pour l'utiliser, la commande `waggle` suffit. Elles tournent toutes dans
 Docker : il n'y a pas Go à installer.
 
 | Commande | Ce qu'elle fait |

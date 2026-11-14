@@ -1,7 +1,7 @@
 # Les essais qui demandent un serveur ou un appareil
 
 Ces essais ne se font pas sur un Mac seul. Ils sont préparés ici, à lancer à la main, une fois
-waggle installé (`bin/waggle install`). Chacun dit ce qu'il établit, comment le lancer, et
+waggle installé (`waggle install`). Chacun dit ce qu'il établit, comment le lancer, et
 ce qu'on attend.
 
 Ce qu'un Mac seul pouvait éprouver l'est déjà, par `make integration` et `make firewall`. En
@@ -64,7 +64,7 @@ ip netns del waggle-dehors; ip link del waggle-h 2>/dev/null
 
 Sur le serveur : `ss -lunpt | grep ':53 '`. Il est attendu que seul `systemd-resolved` y
 écoute, sur `127.0.0.53` et `127.0.0.54`. Un service à l'écoute sur `0.0.0.0:53` empêcherait
-la publication, et `bin/waggle install` le dirait.
+la publication, et `waggle install` le dirait.
 
 Puis, depuis le Mac, tunnel actif : `dig +short @10.8.0.1 <dossier>.<domaine du DNS>`. Attendu :
 `10.8.0.1`.
@@ -125,7 +125,7 @@ décision 5). L'app WireGuard de macOS n'en active peut-être qu'un à la fois.
 VPN (ADR-0001, décisions 6 et 8 ; ADR-0002, décision 2). L'autorité de waggle est en X.509 v3,
 `CA:TRUE` ; ses certificats durent 397 jours, en ECDSA P-256.
 
-L'autorité de l'instance s'obtient par `bin/waggle ca team > ca.crt`, sur le
+L'autorité de l'instance s'obtient par `waggle ca team > ca.crt`, sur le
 serveur.
 
 **Android** (le Pixel) :

@@ -9,7 +9,16 @@
 # `trust` runs on the host itself: it trusts an instance's authority in the macOS keychain.
 set -eu
 
-root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# Follow symlinks back to the script itself: a link in the PATH (~/.local/bin/waggle) must still find the repository
+self=$0
+while [ -L "$self" ]; do
+	target=$(readlink "$self")
+	case "$target" in
+	/*) self=$target ;;
+	*) self=$(dirname -- "$self")/$target ;;
+	esac
+done
+root=$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)
 config=${WAGGLE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/waggle/config.yaml}
 state=${WAGGLE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/waggle}
 image=${WAGGLE_IMAGE:-waggle:local}
@@ -17,7 +26,7 @@ os=${WAGGLE_OS:-$(uname -s)}
 
 case "${1:-help}" in
 help | -h | --help)
-	docker run --rm "$image" help 2>/dev/null || sed -n '2,10p' "$0"
+	docker run --rm "$image" help 2>/dev/null || sed -n '2,10p' "$self"
 	exit 0
 	;;
 trust)
