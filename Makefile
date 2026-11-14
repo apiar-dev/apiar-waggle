@@ -32,4 +32,4 @@ firewall: image
 	sh tests/firewall/test.sh
 
 shellcheck:
-	docker run --rm -v "$(CURDIR):/mnt" -w /mnt koalaman/shellcheck:stable bin/waggle tests/firewall/test.sh
+	docker run --rm -v "$(CURDIR):/mnt" -w /mnt koalaman/shellcheck:stable bin/waggle install.sh tests/firewall/test.sh

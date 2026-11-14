@@ -33,8 +33,8 @@ var Version = "dev"
 
 const usage = `waggle — a machine's dev routing, shared by the projects, never on the internet
 
-  install            read the configuration, write and start each instance; run again, it only changes what changed
-  stop               stop the instances, keeping their authority and configuration
+  up                 read the configuration, write and start each instance; run again, it only changes what changed
+  down               stop and remove the instances' containers, keeping their authority and configuration
   uninstall          remove the instances and their volumes; --all also removes their authority
   status             each instance's containers, and its authority
   ca [instance]      an instance's authority certificate, to trust on a device
@@ -52,9 +52,9 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
-	case "install":
-		err = install()
-	case "stop":
+	case "up":
+		err = up()
+	case "down":
 		err = composeAll("down", "--remove-orphans")
 	case "uninstall":
 		err = uninstall(os.Args[2:])
@@ -101,7 +101,7 @@ func instances() ([]*config.Instance, error) {
 	return config.Validate(f, config.Host{OS: os.Getenv("WAGGLE_OS"), Links: config.HostLinks})
 }
 
-func install() error {
+func up() error {
 	state, err := stateDir()
 	if err != nil {
 		return err
@@ -263,7 +263,7 @@ func status() error {
 		dir := filepath.Join(state, inst.Name)
 		fmt.Printf("== instance %s, on %s\n", inst.Name, inst.Address)
 		if _, err := os.Stat(filepath.Join(dir, "compose.json")); err != nil {
-			fmt.Println("  not installed (bin/waggle install)")
+			fmt.Println("  not started (waggle up)")
 			continue
 		}
 		if err := dockerCompose(filepath.Join(dir, "compose.json"), "ps"); err != nil {
@@ -299,7 +299,7 @@ func printCA(args []string) error {
 	}
 	content, err := os.ReadFile(filepath.Join(state, name, "ca", "ca.crt"))
 	if err != nil {
-		return fmt.Errorf("instance %s has no authority: run bin/waggle install first", name)
+		return fmt.Errorf("instance %s has no authority: run waggle up first", name)
 	}
 	_, err = os.Stdout.Write(content)
 	return err

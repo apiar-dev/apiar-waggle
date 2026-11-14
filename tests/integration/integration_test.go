@@ -151,7 +151,7 @@ func setup() error {
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 		return err
 	}
-	out, err := waggle("install")
+	out, err := waggle("up")
 	if err != nil {
 		return err
 	}
@@ -473,12 +473,12 @@ func TestRefusalAndRemoval(t *testing.T) {
 
 func TestRunAgain(t *testing.T) {
 	before, _ := run(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-workstation")
-	if _, err := waggle("install"); err != nil {
+	if _, err := waggle("up"); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := run(nil, "docker", "ps", "-q", "--filter", "label=waggle.instance="+id+"-workstation")
 	if before != after {
-		t.Errorf("running install again recreates nothing:\n%s\n%s", before, after)
+		t.Errorf("running up again recreates nothing:\n%s\n%s", before, after)
 	}
 	if _, err := run(nil, "docker", "restart", "waggle-"+id+"-workstation-controller-1"); err != nil {
 		t.Fatal(err)

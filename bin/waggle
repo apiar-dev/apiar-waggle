@@ -24,13 +24,28 @@ state=${WAGGLE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/waggle}
 image=${WAGGLE_IMAGE:-waggle:local}
 os=${WAGGLE_OS:-$(uname -s)}
 
+# trusted CERT: whether the user's trust settings already hold this certificate. macOS files them under the
+# certificate's SHA-1 fingerprint.
+trusted() {
+	fingerprint=$(openssl x509 -in "$1" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
+	settings=$(mktemp)
+	held=1
+	if security trust-settings-export "$settings" >/dev/null 2>&1 &&
+		plutil -p "$settings" | grep -qi "\"$fingerprint\""; then
+		held=0
+	fi
+	rm -f "$settings"
+	return "$held"
+}
+
 case "${1:-help}" in
 help | -h | --help)
 	docker run --rm "$image" help 2>/dev/null || sed -n '2,10p' "$self"
 	exit 0
 	;;
 trust)
-	# The authority goes to the login keychain, trusted for TLS: macOS asks for the session password
+	# The authority goes to the login keychain, trusted for TLS: macOS asks for the session password, once per
+	# authority. An authority already trusted is left alone, so that running it again asks nothing.
 	name=${2:-*}
 	found=0
 	for cert in "$state"/$name/ca/ca.crt; do
@@ -38,6 +53,10 @@ trust)
 		found=1
 		case "$os" in
 		Darwin)
+			if trusted "$cert"; then
+				echo "waggle: $cert is already trusted"
+				continue
+			fi
 			echo "waggle: trusting $cert in the login keychain"
 			security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$cert"
 			;;
@@ -47,7 +66,7 @@ trust)
 			;;
 		esac
 	done
-	[ "$found" = 1 ] || { echo "waggle: no authority in $state: run bin/waggle install first" >&2; exit 1; }
+	[ "$found" = 1 ] || { echo "waggle: no authority in $state: run waggle up first" >&2; exit 1; }
 	exit 0
 	;;
 esac
