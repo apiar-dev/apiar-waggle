@@ -1,6 +1,9 @@
 # ADR-0001 — waggle : le routage de dev d'une machine, partagé par les projets, jamais sur internet
 
 **Statut** : **Accepté** (2026-11-14), par Benjamin.
+**Amendé** par l'[ADR-0002](0002-le-modele-upsun-des-routes-declarees-un-tls-termine-par-waggle.md),
+décisions 2, 3 et 5 : des routes au format de waggle, un TLS terminé par waggle, un relais par
+domaine, dans le mode du domaine.
 **Zone** : le routage des environnements de développement — ce qui tient les ports d'une
 machine, résout les noms de dev et filtre le réseau —, pour tous les projets qui lèvent une
 stack Docker par dossier.
