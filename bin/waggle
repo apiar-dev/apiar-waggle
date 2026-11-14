@@ -1,0 +1,76 @@
+#!/bin/sh
+# waggle, depuis l'hôte (README) : construit l'image de waggle depuis ce dépôt, puis y lance la commande, avec le socket
+# Docker, le fichier de réglages et le dossier d'état. Rien d'autre à installer qu'un Docker.
+#
+#   WAGGLE_REGLAGES   le fichier de réglages, ~/.config/waggle/reglages.yaml par défaut ;
+#   WAGGLE_ETAT       le dossier d'état (autorités, configuration écrite), ~/.local/state/waggle par défaut ;
+#   WAGGLE_IMAGE      le nom de l'image, waggle:local par défaut.
+#
+# `approuver` tourne sur l'hôte lui-même : il approuve l'autorité d'une instance dans le trousseau de macOS.
+set -eu
+
+racine=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+reglages=${WAGGLE_REGLAGES:-${XDG_CONFIG_HOME:-$HOME/.config}/waggle/reglages.yaml}
+etat=${WAGGLE_ETAT:-${XDG_STATE_HOME:-$HOME/.local/state}/waggle}
+image=${WAGGLE_IMAGE:-waggle:local}
+systeme=${WAGGLE_SYSTEME:-$(uname -s)}
+
+case "${1:-aide}" in
+aide | -h | --help)
+	docker run --rm "$image" aide 2>/dev/null || sed -n '2,10p' "$0"
+	exit 0
+	;;
+approuver)
+	# L'autorité va au trousseau de session, approuvée pour le TLS : macOS demande le mot de passe de la session
+	nom=${2:-*}
+	trouve=0
+	for cert in "$etat"/$nom/autorite/autorite.crt; do
+		[ -f "$cert" ] || continue
+		trouve=1
+		case "$systeme" in
+		Darwin)
+			echo "waggle : approuver $cert dans le trousseau de session"
+			security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$cert"
+			;;
+		*)
+			echo "waggle : sur $systeme, copier $cert dans /usr/local/share/ca-certificates/waggle.crt, puis lancer update-ca-certificates en root."
+			echo "  Chrome et Firefox tiennent leur propre base : la marche à suivre est dans le README."
+			;;
+		esac
+	done
+	[ "$trouve" = 1 ] || { echo "waggle : aucune autorité dans $etat : bin/waggle installer d'abord" >&2; exit 1; }
+	exit 0
+	;;
+esac
+
+if [ ! -f "$reglages" ]; then
+	echo "waggle : pas de réglages à $reglages" >&2
+	echo "  Un exemple, à copier et adapter : $racine/reglages.exemple.yaml" >&2
+	exit 1
+fi
+mkdir -p "$etat"
+
+# Le cache de Docker rend la construction instantanée quand rien n'a changé
+version=$(git -C "$racine" describe --always --dirty 2>/dev/null || echo dev)
+docker build --quiet --build-arg VERSION="$version" --tag "$image" "$racine" >/dev/null
+
+# Sur Linux, la commande lit les interfaces de l'hôte pour vérifier qu'une adresse est bien celle d'un VPN, et écrit le
+# dossier d'état sous le nom de l'utilisateur
+reseau=bridge
+utilisateur=
+if [ "$systeme" = Linux ]; then
+	reseau=host
+	utilisateur="--user $(id -u):$(id -g) --group-add $(stat -c %g /var/run/docker.sock)"
+fi
+
+# shellcheck disable=SC2086 # $utilisateur se découpe en options
+exec docker run --rm --interactive --network "$reseau" $utilisateur \
+	--volume /var/run/docker.sock:/var/run/docker.sock \
+	--volume "$reglages:/reglages.yaml:ro" \
+	--volume "$etat:$etat" \
+	--env HOME=/tmp \
+	--env WAGGLE_ETAT="$etat" \
+	--env WAGGLE_IMAGE="$image" \
+	--env WAGGLE_SYSTEME="$systeme" \
+	--env WAGGLE_MACHINE="$(hostname -s 2>/dev/null || hostname)" \
+	"$image" "$@"
