@@ -225,8 +225,12 @@ services:
   | `http://` | en clair sur le port 80, par exemple `http://admin.{stack}.localhost/` |
   | `tls://` | le passage : la stack termine son TLS, et waggle route par le SNI |
 
-- **Un hôte joker**, `https://*.{stack}.dev.example.com/`, sert une famille d'hôtes, y compris les noms à plusieurs
-  labels sous la stack. Un nom exact de la même stack passe avant lui : `admin.{stack}…` reste à la route qui le nomme.
+- **Un hôte joker**, `https://*.{stack}.dev.example.com/`, sert une famille d'hôtes. Un nom exact de la même stack passe
+  avant lui : `admin.{stack}…` reste à la route qui le nomme.
+- **Un joker en `https://` ne couvre qu'un label sous la stack.** En `http://` et en `tls://`, il route aussi les noms
+  plus profonds (`www.example.org.{stack}.dev.example.com`). En `https://`, son certificat ne les couvre pas : c'est la
+  règle des jokers de X.509, et le navigateur reçoit le certificat par défaut de Traefik. Un nom plus profond se déclare
+  alors par son hôte exact, une ligne par nom (voir « Les certificats »).
 - **Un chemin**, `/api`, prend `/api` et ce qui est dessous, mais pas `/apiv2`. Le plus long passe avant les autres.
 - **Les refus.** Une route dont l'hôte ne porte pas `{stack}` est refusée : une stack ne prend pas le nom d'une autre. Une
   route disputée reste à la stack la plus ancienne.
@@ -242,8 +246,12 @@ services:
 - Chaque instance a son autorité : `~/.local/state/waggle/<instance>/ca/`. Elle naît à l'installation, sa clé ne quitte
   pas la machine, et elle dure dix ans.
 - Le contrôleur signe ce que les routes demandent :
-  - un joker par domaine ;
-  - un certificat propre à une stack qui a des noms à deux labels (`api.<stack>.<domaine>`).
+  - un joker par domaine, pour les noms à un label (`<stack>.<domaine>`) ;
+  - un certificat propre à une stack dont les noms ont plus de labels. Il couvre `<stack>.<domaine>` et, en joker, le
+    parent de chaque nom : `*.<stack>.<domaine>` pour `api.<stack>.<domaine>`, `*.example.org.<stack>.<domaine>` pour
+    `www.example.org.<stack>.<domaine>`.
+- Un joker ne couvre qu'un label : un nom en `https://` qu'aucun de ces jokers ne couvre reçoit le certificat par défaut
+  de Traefik, que le navigateur refuse.
 - Chaque certificat dure 397 jours, et se renouvelle seul à 30 jours de son terme.
 - `waggle ca [instance]` écrit le certificat de l'autorité, à passer à un appareil.
 - `waggle uninstall --all` retire l'autorité avec le reste. Les appareils qui l'approuvaient ne la reconnaîtront
