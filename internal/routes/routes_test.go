@@ -84,3 +84,10 @@ func TestOneFaultyLineTakesOnlyItself(t *testing.T) {
 		t.Fatalf("%d routes, %d errors", len(rs), len(errs))
 	}
 }
+
+func TestDeclaredPorts(t *testing.T) {
+	got := DeclaredPorts("https://{stack}.dev.example.com/ 80\nhttps://{stack}.dev.example.com:3000/ 5173\ntls://{stack}.legacy.com:3001\nhttp://{stack}.localhost/ 80\nnonsense")
+	if len(got) != 2 || got[0] != 3000 || got[1] != 3001 {
+		t.Fatalf("the legacy TLS ports only: %v", got)
+	}
+}

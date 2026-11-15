@@ -2,11 +2,13 @@
 # waggle, from the host (README): builds waggle's image from this repository, then runs the command inside it, with the
 # Docker socket, the configuration file and the state directory. Nothing to install but Docker.
 #
-#   WAGGLE_CONFIG   the configuration file, ~/.config/waggle/config.yaml by default;
-#   WAGGLE_STATE    the state directory (authorities, written configuration), ~/.local/state/waggle by default;
-#   WAGGLE_IMAGE    the image name, waggle:local by default.
+#   WAGGLE_CONFIG    the configuration file, ~/.config/waggle/config.yaml by default;
+#   WAGGLE_STATE     the state directory (authorities, written configuration), ~/.local/state/waggle by default;
+#   WAGGLE_IMAGE     the image name, waggle:local by default;
+#   WAGGLE_NO_TRUST  1: setup leaves the macOS keychain alone.
 #
-# `trust` runs on the host itself: it trusts an instance's authority in the macOS keychain.
+# Two commands run on the host itself: `trust`, which trusts an instance's authority in the macOS keychain, and the end
+# of `setup`, which starts the instances it configured, then trusts their authority.
 set -eu
 
 # Follow symlinks back to the script itself: a link in the PATH (~/.local/bin/waggle) must still find the repository
@@ -38,15 +40,10 @@ trusted() {
 	return "$held"
 }
 
-case "${1:-help}" in
-help | -h | --help)
-	docker run --rm "$image" help 2>/dev/null || sed -n '2,10p' "$self"
-	exit 0
-	;;
-trust)
-	# The authority goes to the login keychain, trusted for TLS: macOS asks for the session password, once per
-	# authority. An authority already trusted is left alone, so that running it again asks nothing.
-	name=${2:-*}
+# trust [INSTANCE]: the authority goes to the login keychain, trusted for TLS. macOS asks for the session password, once
+# per authority. An authority already trusted is left alone, so that running it again asks nothing.
+trust() {
+	name=${1:-*}
 	found=0
 	for cert in "$state"/$name/ca/ca.crt; do
 		[ -f "$cert" ] || continue
@@ -66,39 +63,75 @@ trust)
 			;;
 		esac
 	done
-	[ "$found" = 1 ] || { echo "waggle: no authority in $state: run waggle up first" >&2; exit 1; }
-	exit 0
+	[ "$found" = 1 ] || {
+		echo "waggle: no authority in $state: run waggle up first" >&2
+		return 1
+	}
+}
+
+# in_image ro|rw COMMAND...: the command, inside waggle's image. rw mounts the configuration's directory, for setup to
+# write it; ro, the file only.
+in_image() {
+	access=$1
+	shift
+	mkdir -p "$state"
+	# Docker's cache makes the build instant when nothing changed
+	version=$(git -C "$root" describe --always --dirty 2>/dev/null || echo dev)
+	docker build --quiet --build-arg VERSION="$version" --tag "$image" "$root" >/dev/null
+
+	# On Linux, the command reads the host's interfaces to check that an address belongs to a VPN, and writes the state
+	# directory as the user
+	network=bridge
+	user=
+	if [ "$os" = Linux ]; then
+		network=host
+		user="--user $(id -u):$(id -g) --group-add $(stat -c %g /var/run/docker.sock)"
+	fi
+	# A terminal, when there is one: setup asks its questions there
+	tty=
+	if [ -t 0 ] && [ -t 1 ]; then
+		tty=--tty
+	fi
+	if [ "$access" = rw ]; then
+		dir=$(dirname -- "$config")
+		mkdir -p "$dir"
+		set -- --volume "$dir:/config-dir" --env WAGGLE_CONFIG_PATH="/config-dir/$(basename -- "$config")" \
+			--env WAGGLE_CONFIG_HOST="$config" "$image" "$@"
+	else
+		set -- --volume "$config:/config.yaml:ro" "$image" "$@"
+	fi
+	# shellcheck disable=SC2086 # $user and $tty split into options
+	docker run --rm --interactive $tty --network "$network" $user \
+		--volume /var/run/docker.sock:/var/run/docker.sock \
+		--volume "$state:$state" \
+		--env HOME=/tmp \
+		--env WAGGLE_STATE="$state" \
+		--env WAGGLE_IMAGE="$image" \
+		--env WAGGLE_OS="$os" \
+		--env WAGGLE_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
+		"$@"
+}
+
+case "${1:-help}" in
+help | -h | --help)
+	docker run --rm "$image" help 2>/dev/null || sed -n '2,12p' "$self"
+	;;
+trust)
+	trust "${2:-}"
+	;;
+setup)
+	# The questions, then the instances, then their authority
+	in_image rw "$@"
+	in_image ro up
+	if [ "$os" = Darwin ] && [ "${WAGGLE_NO_TRUST:-}" != 1 ]; then
+		trust
+	fi
+	;;
+*)
+	if [ ! -f "$config" ]; then
+		echo "waggle: no configuration at $config: run waggle setup" >&2
+		exit 1
+	fi
+	in_image ro "$@"
 	;;
 esac
-
-if [ ! -f "$config" ]; then
-	echo "waggle: no configuration at $config" >&2
-	echo "  An example, to copy and adapt: $root/config.example.yaml" >&2
-	exit 1
-fi
-mkdir -p "$state"
-
-# Docker's cache makes the build instant when nothing changed
-version=$(git -C "$root" describe --always --dirty 2>/dev/null || echo dev)
-docker build --quiet --build-arg VERSION="$version" --tag "$image" "$root" >/dev/null
-
-# On Linux, the command reads the host's interfaces to check that an address belongs to a VPN, and writes the state
-# directory as the user
-network=bridge
-user=
-if [ "$os" = Linux ]; then
-	network=host
-	user="--user $(id -u):$(id -g) --group-add $(stat -c %g /var/run/docker.sock)"
-fi
-
-# shellcheck disable=SC2086 # $user splits into options
-exec docker run --rm --interactive --network "$network" $user \
-	--volume /var/run/docker.sock:/var/run/docker.sock \
-	--volume "$config:/config.yaml:ro" \
-	--volume "$state:$state" \
-	--env HOME=/tmp \
-	--env WAGGLE_STATE="$state" \
-	--env WAGGLE_IMAGE="$image" \
-	--env WAGGLE_OS="$os" \
-	--env WAGGLE_HOSTNAME="$(hostname -s 2>/dev/null || hostname)" \
-	"$image" "$@"

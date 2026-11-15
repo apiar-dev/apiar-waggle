@@ -95,6 +95,14 @@ func (c *Client) Containers(ctx context.Context, label string) ([]Summary, error
 	return list, err
 }
 
+// AllContainers lists the containers that carry this label, running or not.
+func (c *Client) AllContainers(ctx context.Context, label string) ([]Summary, error) {
+	filters, _ := json.Marshal(map[string][]string{"label": {label}})
+	var list []Summary
+	err := c.do(ctx, http.MethodGet, "/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil, &list)
+	return list, err
+}
+
 // Inspect returns a container's details.
 func (c *Client) Inspect(ctx context.Context, id string) (*Container, error) {
 	var ct Container

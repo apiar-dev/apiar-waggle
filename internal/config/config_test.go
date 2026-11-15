@@ -22,9 +22,22 @@ func server(links ...Link) Host {
 }
 
 func link(name string, wg bool, cidr string) Link {
+	kind := ""
+	if wg {
+		kind = WireGuard
+	}
+	return tunnel(name, kind, cidr)
+}
+
+func tunnel(name, kind, cidr string) Link {
 	ip, network, _ := net.ParseCIDR(cidr)
 	network.IP = ip
-	return Link{Name: name, WireGuard: wg, Networks: []*net.IPNet{network}}
+	return Link{Name: name, Kind: kind, Networks: []*net.IPNet{network}}
+}
+
+func (h Host) links() []Link {
+	l, _ := h.Links()
+	return l
 }
 
 func wantError(t *testing.T, err error, part string) {
@@ -68,7 +81,11 @@ func TestNeverOnTheInternet(t *testing.T) {
 	_, err = validate(t, "instances:\n  workstation:\n    address: 10.8.0.2\n", mac)
 	wantError(t, err, "only listens on loopback")
 	_, err = validate(t, "instances:\n  vps:\n    address: 51.15.0.1\n", server(link("eth0", false, "51.15.0.1/24")))
-	wantError(t, err, "not a WireGuard interface")
+	wantError(t, err, "a public address")
+	_, err = validate(t, "instances:\n  vps:\n    address: 51.15.0.1\n    interface: eth0\n", server(link("eth0", false, "51.15.0.1/24")))
+	wantError(t, err, "a public address")
+	_, err = validate(t, "instances:\n  vps:\n    address: 172.31.0.5\n", server(link("eth0", false, "172.31.0.5/20")))
+	wantError(t, err, "not a VPN interface")
 	_, err = validate(t, "instances:\n  vps:\n    address: 10.9.0.1\n", server(link("wg0", true, "10.8.0.1/24")))
 	wantError(t, err, "no interface")
 }
@@ -79,7 +96,6 @@ instances:
   team:
     address: 10.8.0.1
     projects: [my-project]
-    dns: [dev.example.com]
   clients:
     address: 10.9.0.1
     projects: [other]
@@ -100,6 +116,101 @@ instances:
 	if tm.ServesProject("other") || !tm.ServesProject("my-project") {
 		t.Fatal("an instance only serves its projects")
 	}
+	if !tm.Shares() || !tm.ServesDNS() {
+		t.Fatal("a server instance shares its stacks, and runs the VPN DNS")
+	}
+}
+
+// Any VPN's interface serves, not only WireGuard's; another interface, only when named (ADR-0003, decision 7).
+func TestAnyVPN(t *testing.T) {
+	h := server(
+		tunnel("tailscale0", TUN, "100.101.102.103/32"),
+		tunnel("zt0", TUN, "10.147.17.4/24"),
+		tunnel("tun0", TUN, "10.20.0.1/32"),
+		tunnel("eth1", "", "192.168.1.10/24"),
+	)
+	insts, err := validate(t, "instances:\n  vpn:\n    address: 100.101.102.103\n", h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := insts[0]; v.Interface != "tailscale0" || v.RelayListener.TrustedIPs[0] != "100.64.0.0/10" {
+		t.Errorf("a /32 of the shared range trusts the range: %+v %+v", v, v.RelayListener)
+	}
+	insts, err = validate(t, "instances:\n  vpn:\n    address: 10.147.17.4\n", h)
+	if err != nil || insts[0].RelayListener.TrustedIPs[0] != "10.147.17.0/24" {
+		t.Errorf("ZeroTier: the interface's network: %v %+v", err, insts)
+	}
+	_, err = validate(t, "instances:\n  vpn:\n    address: 10.20.0.1\n", h)
+	wantError(t, err, "relay_listener.trusted_ips")
+	_, err = validate(t, "instances:\n  lan:\n    address: 192.168.1.10\n", h)
+	wantError(t, err, "name it (interface: eth1)")
+	insts, err = validate(t, "instances:\n  lan:\n    address: 192.168.1.10\n    interface: eth1\n", h)
+	if err != nil || insts[0].Interface != "eth1" {
+		t.Errorf("a named interface serves: %v", err)
+	}
+	for l, want := range map[string]string{"tailscale0": "Tailscale", "zt0": "ZeroTier", "tun0": "a tunnel", "eth1": ""} {
+		for _, x := range h.links() {
+			if x.Name == l && x.VPN() != want {
+				t.Errorf("%s: %q, want %q", l, x.VPN(), want)
+			}
+		}
+	}
+}
+
+func TestDNS(t *testing.T) {
+	h := server(link("wg0", true, "10.8.0.1/24"))
+	insts, err := validate(t, "instances:\n  team:\n    address: 10.8.0.1\n    dns: false\n", h)
+	if err != nil || insts[0].ServesDNS() {
+		t.Errorf("dns: false turns the VPN DNS off: %v", err)
+	}
+	_, err = validate(t, "instances:\n  w:\n    address: 127.0.0.1\n    dns: true\n", mac)
+	wantError(t, err, "shares its stacks")
+	_, err = validate(t, "instances:\n  team:\n    address: 10.8.0.1\n    dns: [dev.example.com]\n", h)
+	if err == nil {
+		t.Error("the former list of domains is refused: the DNS reads them from the routes")
+	}
+}
+
+func TestAddPorts(t *testing.T) {
+	h := server(link("wg0", true, "10.8.0.1/24"))
+	insts, err := validate(t, "instances:\n  team:\n    address: 10.8.0.1\n    ports: [3000]\n", h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := insts[0]
+	skipped := team.AddPorts([]int{3001, 443, 80, 3000, 53, 8080, 3001})
+	if got := team.Ports; len(got) != 2 || got[0] != 3000 || got[1] != 3001 {
+		t.Errorf("new ports only, once, sorted: %v", got)
+	}
+	if len(skipped) != 2 {
+		t.Errorf("53 and the relay listener's port are skipped, and said: %v", skipped)
+	}
+}
+
+// A server instance also serves its own machine on loopback, for its agents (ADR-0003). One instance per machine does.
+func TestLoopback(t *testing.T) {
+	h := server(link("wg0", true, "10.8.0.1/24"), link("wg1", true, "10.9.0.1/24"))
+	insts, err := validate(t, "instances:\n  team:\n    address: 10.8.0.1\n    loopback: true\n", h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := insts[0].LoopbackPorts(); len(got) != 2 || got[0] != 80 || got[1] != 443 {
+		t.Errorf("on loopback, the stacks' entry points only, not the relay listener: %v", got)
+	}
+	_, err = validate(t, "instances:\n  workstation:\n    address: 127.0.0.1\n    loopback: true\n", mac)
+	wantError(t, err, "for a server instance")
+	_, err = validate(t, `
+instances:
+  team: {address: 10.8.0.1, loopback: true, projects: [p]}
+  clients: {address: 10.9.0.1, loopback: true, projects: [q]}
+`, h)
+	wantError(t, err, "one instance per machine serves its loopback")
+	_, err = validate(t, `
+instances:
+  team: {address: 10.8.0.1, loopback: true, projects: [p]}
+  local: {address: 127.0.0.1, projects: [q]}
+`, h)
+	wantError(t, err, "one instance per machine serves its loopback")
 }
 
 func TestIsolation(t *testing.T) {
@@ -126,6 +237,7 @@ func TestRefusals(t *testing.T) {
 		"instances:\n  W: {address: 127.0.0.1}\n":                                                          "lowercase",
 		"instances:\n  w: {address: 127.0.0.1, relays: [{to: x, domains: [ftp://a.b]}]}\n":                 "scheme",
 		"instances:\n  w: {address: 127.0.0.1, relays: [{to: x, domains: [https://localhost]}]}\n":         "two labels",
+		"instances:\n  w: {address: 127.0.0.1, relays: [{domains: [http://localhost]}]}\n":                 "where to",
 		"instances:\n  a: {address: 127.0.0.1, projects: [x]}\n  b: {address: 127.0.0.1, projects: [y]}\n": "same address",
 	}
 	for yaml, want := range cases {

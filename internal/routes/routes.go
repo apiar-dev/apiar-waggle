@@ -172,6 +172,20 @@ func parseLine(line, stack string, exposed []int) (Route, error) {
 	return r, nil
 }
 
+// DeclaredPorts are the TLS entry ports a label's routes need, besides 443: the legacy ports an instance publishes
+// (ADR-0003, decision 6). Faulty lines say nothing.
+func DeclaredPorts(value string) []int {
+	// Neither the stack name nor the service port matter here
+	parsed, _ := Parse(value, "x", []int{1})
+	var ports []int
+	for _, r := range parsed {
+		if r.Mode != HTTP && r.Port != 443 {
+			ports = append(ports, r.Port)
+		}
+	}
+	return ports
+}
+
 // Wildcard tells whether the host is a family (*.a.dev.example.com).
 func (r Route) Wildcard() bool { return strings.HasPrefix(r.Host, "*.") }
 

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs waggle on this machine, macOS or Linux, or upgrades it: run it again, it brings the clone to the wanted
-# version, rebuilds the image and restarts what changed (README).
+# version, rebuilds the image and restarts what changed. The first time, waggle setup asks the configuration
+# (README, ADR-0003, decision 6).
 #
 #   gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
 #
@@ -10,6 +11,7 @@
 #   WAGGLE_HOME      the clone, ~/.local/share/waggle by default;
 #   WAGGLE_BIN       the directory the command is linked into, ~/.local/bin by default;
 #   WAGGLE_CONFIG    the configuration file, ~/.config/waggle/config.yaml by default, as for the command;
+#   WAGGLE_SETUP     the answers to waggle setup, for an install without a terminal: "--share tailscale0", for example;
 #   WAGGLE_NO_TRUST  1: leave the macOS keychain alone (tests, unattended installs).
 #
 # Everything sits in main, called on the last line: a download cut short runs nothing.
@@ -107,25 +109,29 @@ main() {
 	fetch
 	link
 
-	# The configuration: a Mac is a workstation, and the example's instance is all it needs. A Linux machine may be a
-	# server, whose instances depend on its VPNs: that one is written by hand.
-	if [ ! -f "$config" ]; then
-		if [ "$os" != Darwin ]; then
-			say "waggle is installed, with no configuration yet. Copy the example and adapt it:"
-			printf '\n  mkdir -p %s && cp %s %s\n\n' "$(dirname -- "$config")" "$home/config.example.yaml" "$config"
-			say "then run this again, or waggle up (the README describes a server's configuration)."
-			path_hint
-			return 0
+	if [ -f "$config" ]; then
+		say "starting the instances; the first build of waggle's image takes a minute or two"
+		"$home/bin/waggle" up </dev/null
+		if [ "$os" = Darwin ] && [ "${WAGGLE_NO_TRUST:-}" != 1 ]; then
+			"$home/bin/waggle" trust
 		fi
-		mkdir -p "$(dirname -- "$config")"
-		cp "$home/config.example.yaml" "$config"
-		say "configuration written to $config: one workstation instance, on 127.0.0.1"
-	fi
-
-	say "starting the instances; the first build of waggle's image takes a minute or two"
-	"$home/bin/waggle" up </dev/null
-	if [ "$os" = Darwin ] && [ "${WAGGLE_NO_TRUST:-}" != 1 ]; then
-		"$home/bin/waggle" trust
+	elif [ -n "${WAGGLE_SETUP:-}" ]; then
+		# shellcheck disable=SC2086 # the answers split into options
+		"$home/bin/waggle" setup $WAGGLE_SETUP </dev/null
+	elif (: </dev/tty) 2>/dev/null; then
+		# This script comes through a pipe: the answers come from the terminal
+		say "no configuration yet: waggle setup asks it; the first build of waggle's image takes a minute or two"
+		"$home/bin/waggle" setup </dev/tty
+	elif [ "$os" = Darwin ]; then
+		# Without a terminal, a Mac's answer is harmless: a workstation, without relay
+		"$home/bin/waggle" setup </dev/null
+	else
+		say "no configuration yet, and no terminal to ask it: give waggle setup its answers, for example"
+		printf '\n  %s setup --share none   # this machine serves its own agents only\n' "$bin/waggle"
+		printf '  %s setup --share wg0    # other devices reach it through wg0\n\n' "$bin/waggle"
+		say "or run this again with WAGGLE_SETUP=\"--share wg0\"."
+		path_hint
+		return 0
 	fi
 	path_hint
 	say "done. Run this again to upgrade."

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/apiar-dev/apiar-waggle/internal/ca"
 	"github.com/apiar-dev/apiar-waggle/internal/config"
 	"github.com/apiar-dev/apiar-waggle/internal/docker"
+	"github.com/apiar-dev/apiar-waggle/internal/publish"
 	"github.com/apiar-dev/apiar-waggle/internal/render"
 	"github.com/apiar-dev/apiar-waggle/internal/routes"
 	"github.com/apiar-dev/apiar-waggle/internal/traefik"
@@ -44,6 +46,7 @@ type Controller struct {
 	CA       *ca.Authority
 	Docker   Docker
 	Dir      string // Traefik's dynamic directory
+	Zones    string // the VPN DNS zones, on an instance that runs it; "" otherwise
 	Log      *log.Logger
 	Now      func() time.Time
 
@@ -183,7 +186,7 @@ func (c *Controller) Rebuild(ctx context.Context) error {
 		}
 		for i, r := range parsed {
 			if r.Mode != routes.HTTP && !c.Instance.InCatalog(r.Port) {
-				refuse("%s, route refused: %q: port %d is not in the instance catalog (configuration, ports)", name, r.Text, r.Port)
+				refuse("%s, route refused: %q: the instance does not publish port %d yet: run waggle up", name, r.Text, r.Port)
 				continue
 			}
 			candidates = append(candidates, candidate{route: traefik.ServedRoute{Route: r, Container: name, IP: ip}, created: summary.Created, order: i})
@@ -261,7 +264,88 @@ func (c *Controller) write(kept []traefik.ServedRoute) error {
 			return err
 		}
 	}
+	if c.Zones != "" {
+		return c.writeZones(kept)
+	}
 	return nil
+}
+
+// publishedFile keeps, in the zones directory, the domains this server has published: the list only grows, so that a
+// workstation still relays the domain of a stack that is stopped (ADR-0003, decision 9).
+const publishedFile = "published.json"
+
+// writeZones writes the VPN DNS: a zone per stack name served under a real domain, where the name and everything below
+// it answer the instance address (ADR-0003, decision 8), and the waggle zone, which publishes this server's domains and
+// legacy ports to its workstations (decision 9). CoreDNS loads them by itself.
+func (c *Controller) writeZones(kept []traefik.ServedRoute) error {
+	// A domain is terminated or passthrough, never both: the current mode replaces a former one
+	domains := map[string]string{}
+	if content, err := os.ReadFile(filepath.Join(c.Zones, publishedFile)); err == nil {
+		var former []string
+		json.Unmarshal(content, &former)
+		for _, d := range former {
+			if rd, err := config.ParseRelayedDomain(d); err == nil {
+				domains[class(rd.Mode, rd.Domain)] = d
+			}
+		}
+	}
+	wanted := map[string][]byte{}
+	for _, r := range kept {
+		domains[class(string(r.Mode), r.Domain)] = string(r.Mode) + "://" + r.Domain
+		if !localOnly(r.Domain) {
+			zone := r.Stack + "." + r.Domain
+			wanted["db."+zone] = zoneFile(zone, "@ 10 IN A "+c.Instance.Address, "* 10 IN A "+c.Instance.Address)
+		}
+	}
+	list := publish.List{Ports: c.Instance.Ports}
+	for _, d := range domains {
+		list.Domains = append(list.Domains, d)
+	}
+	sort.Strings(list.Domains)
+	var records []string
+	for _, r := range list.Records() {
+		records = append(records, fmt.Sprintf("relay 10 IN TXT %q", r))
+	}
+	wanted["db."+strings.TrimSuffix(publish.Zone, ".")] = zoneFile(strings.TrimSuffix(publish.Zone, "."), records...)
+
+	published, _ := json.MarshalIndent(list.Domains, "", "  ")
+	if err := writeFile(filepath.Join(c.Zones, publishedFile), append(published, '\n'), 0o644); err != nil {
+		return err
+	}
+	for name, content := range wanted {
+		if err := writeFile(filepath.Join(c.Zones, name), content, 0o644); err != nil {
+			return err
+		}
+	}
+	entries, _ := os.ReadDir(c.Zones)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "db.") && wanted[e.Name()] == nil {
+			os.Remove(filepath.Join(c.Zones, e.Name()))
+		}
+	}
+	return nil
+}
+
+// class groups a domain's modes: HTTP on one side, terminated or passthrough TLS on the other.
+func class(mode, domain string) string {
+	if mode == string(routes.HTTP) {
+		return "http " + domain
+	}
+	return "tls " + domain
+}
+
+// localOnly tells whether names under the domain never leave the machine that shows them (RFC 6761).
+func localOnly(domain string) bool {
+	return domain == "localhost" || strings.HasSuffix(domain, ".localhost")
+}
+
+// zoneFile is a zone in master file format. Its serial is the hash of its records: CoreDNS reloads a zone when it
+// changes.
+func zoneFile(origin string, records ...string) []byte {
+	body := strings.Join(records, "\n")
+	h := fnv.New32a()
+	h.Write([]byte(body))
+	return []byte(fmt.Sprintf("; Written by waggle's controller\n$ORIGIN %s.\n@ 10 IN SOA waggle. waggle. %d 60 60 60 10\n%s\n", origin, h.Sum32(), body))
 }
 
 // certificates keeps one certificate per wanted entry, reissued when it is no longer valid. Its file name carries its
@@ -352,12 +436,18 @@ func (c *Controller) report(kept []traefik.ServedRoute, refusals map[string]bool
 }
 
 // writeIfChanged writes a file through a rename, and only when its content changes: Traefik only reloads what moves.
-func writeIfChanged(path string, content []byte) error {
+func writeIfChanged(path string, content []byte) error { return writeFile(path, content, 0o600) }
+
+// writeFile is writeIfChanged, with the file's permissions: CoreDNS, which runs as another user, reads the zones.
+func writeFile(path string, content []byte, perm os.FileMode) error {
 	if current, err := os.ReadFile(path); err == nil && string(current) == string(content) {
 		return nil
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o600); err != nil {
+	if err := os.WriteFile(tmp, content, perm); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

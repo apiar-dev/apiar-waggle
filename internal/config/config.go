@@ -1,6 +1,6 @@
 // Package config reads and validates a machine's configuration file: its instances, their addresses, ports, projects,
-// relays and DNS (ADR-0001, decisions 1, 4 and 7). An address that is neither loopback nor carried by a WireGuard
-// interface is refused: a dev URL is never on the internet.
+// relays and DNS (ADR-0001, decisions 1, 4 and 7; ADR-0003). An address that is neither loopback nor a private address
+// of a VPN interface — or of an interface the configuration names — is refused: a dev URL is never on the internet.
 package config
 
 import (
@@ -30,21 +30,24 @@ type File struct {
 type Instance struct {
 	Name          string         `yaml:"-" json:"name"`
 	Address       string         `yaml:"address" json:"address"`
+	Loopback      bool           `yaml:"loopback,omitempty" json:"loopback,omitempty"`
 	Interface     string         `yaml:"interface,omitempty" json:"interface,omitempty"`
 	Projects      []string       `yaml:"projects,omitempty" json:"projects,omitempty"`
 	Ports         []int          `yaml:"ports,omitempty" json:"ports,omitempty"`
 	Relays        []Relay        `yaml:"relays,omitempty" json:"relays,omitempty"`
-	DNS           []string       `yaml:"dns,omitempty" json:"dns,omitempty"`
+	DNS           *bool          `yaml:"dns,omitempty" json:"dns,omitempty"`
 	RelayListener *RelayListener `yaml:"relay_listener,omitempty" json:"relay_listener,omitempty"`
 	PortOffset    int            `yaml:"port_offset,omitempty" json:"port_offset,omitempty"`
 }
 
-// Relay is a server to which this workstation relays the domains it does not serve.
+// Relay is a server to which this workstation relays the domains it does not serve. Without domains, they are learned
+// from the server, at each `waggle up` (ADR-0003, decision 9).
 type Relay struct {
 	To         string   `yaml:"to" json:"to"`
-	Domains    []string `yaml:"domains" json:"domains"`
+	Domains    []string `yaml:"domains,omitempty" json:"domains,omitempty"`
 	RelayPort  int      `yaml:"relay_port,omitempty" json:"relay_port,omitempty"`
 	PortOffset int      `yaml:"port_offset,omitempty" json:"port_offset,omitempty"`
+	Learned    bool     `yaml:"-" json:"-"` // the domains come from the server
 }
 
 // RelayListener is a server's HTTP entry point for workstation relays, and the networks whose X-Forwarded-* headers it
@@ -62,10 +65,63 @@ type RelayedDomain struct {
 
 // Link is a network interface of the machine.
 type Link struct {
-	Name      string
-	WireGuard bool
-	Networks  []*net.IPNet
+	Name     string
+	Kind     string // WireGuard, TUN, or "" for any other interface
+	Networks []*net.IPNet
 }
+
+// The kinds of tunnel interfaces, those of a VPN (ADR-0003, decision 7).
+const (
+	WireGuard = "wireguard" // DEVTYPE=wireguard: WireGuard, NetBird in kernel mode
+	TUN       = "tun"       // a TUN or TAP device: Tailscale, ZeroTier, Nebula, OpenVPN…
+)
+
+// Tunnel tells whether the interface is a VPN's.
+func (l Link) Tunnel() bool { return l.Kind != "" }
+
+// VPN names the VPN behind a tunnel interface, from the name its software gives it.
+func (l Link) VPN() string {
+	switch {
+	case !l.Tunnel():
+		return ""
+	case strings.HasPrefix(l.Name, "tailscale"):
+		return "Tailscale"
+	case strings.HasPrefix(l.Name, "zt"):
+		return "ZeroTier"
+	case strings.HasPrefix(l.Name, "wt"):
+		return "NetBird"
+	case strings.HasPrefix(l.Name, "nebula"):
+		return "Nebula"
+	case l.Kind == WireGuard:
+		return "WireGuard"
+	}
+	return "a tunnel"
+}
+
+// IPv4 is the interface's first IPv4 address, or nil.
+func (l Link) IPv4() net.IP {
+	for _, n := range l.Networks {
+		if ip := n.IP.To4(); ip != nil {
+			return ip
+		}
+	}
+	return nil
+}
+
+// Shared is the range of Tailscale, headscale and NetBird: they put a single address on their interface, a /32 that says
+// nothing of the VPN's network.
+var Shared = mustCIDR("100.64.0.0/10")
+
+func mustCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
+
+// Private tells whether an address can carry dev URLs: a private address (RFC 1918), or one of the shared range.
+func Private(ip net.IP) bool { return ip.IsPrivate() || Shared.Contains(ip) }
 
 // Host is what validation needs to know about the machine.
 type Host struct {
@@ -141,7 +197,7 @@ func validateInstance(inst *Instance, osName string, links []Link) []error {
 	ip := net.ParseIP(inst.Address).To4()
 	switch {
 	case inst.Address == "":
-		fail("address is missing (127.0.0.1 on a workstation, the WireGuard address on a server)")
+		fail("address is missing (127.0.0.1 on a workstation, its VPN address on a server)")
 	case ip == nil:
 		fail("address %q is not an IPv4 address", inst.Address)
 	case ip.IsUnspecified():
@@ -150,21 +206,33 @@ func validateInstance(inst *Instance, osName string, links []Link) []error {
 		if inst.Interface != "" {
 			fail("a loopback address has no interface to name")
 		}
+		if inst.Loopback {
+			fail("loopback: true is for a server instance; %s already is loopback", inst.Address)
+		}
 	case osName != "Linux":
 		fail("on %s, waggle only listens on loopback: %s refused", osLabel(osName), inst.Address)
+	case !Private(ip):
+		fail("waggle refuses %s, a public address: a dev URL is never on the internet", inst.Address)
 	default:
 		link, network := linkOf(ip, links)
 		switch {
 		case link == nil:
 			fail("no interface of this machine carries %s", inst.Address)
-		case !link.WireGuard:
-			fail("%s is on %s, which is not a WireGuard interface: waggle only listens on loopback or a VPN", inst.Address, link.Name)
 		case inst.Interface != "" && inst.Interface != link.Name:
 			fail("%s is on %s, not on %s", inst.Address, link.Name, inst.Interface)
+		case !link.Tunnel() && inst.Interface == "":
+			// Another interface — IPsec, a local network, a provider's private network — serves only when named: whatever
+			// reaches the address through it reaches the stacks
+			fail("%s is on %s, which is not a VPN interface (WireGuard, TUN or TAP): to share the stacks with whatever reaches it, name it (interface: %s)",
+				inst.Address, link.Name, link.Name)
 		default:
 			inst.Interface = link.Name
 			if inst.RelayListener == nil {
-				inst.RelayListener = &RelayListener{Port: DefaultRelayPort, TrustedIPs: []string{network.String()}}
+				if trusted, ok := trustedNetwork(ip, network); ok {
+					inst.RelayListener = &RelayListener{Port: DefaultRelayPort, TrustedIPs: []string{trusted}}
+				} else {
+					fail("%s is alone on %s (/32), which says nothing of its VPN's network: write it in relay_listener.trusted_ips", inst.Address, link.Name)
+				}
 			}
 		}
 	}
@@ -225,9 +293,6 @@ func validateInstance(inst *Instance, osName string, links []Link) []error {
 		if r.PortOffset < 0 || r.PortOffset > 60000 {
 			fail("port_offset of relay %d must be between 0 and 60000", i+1)
 		}
-		if len(r.Domains) == 0 {
-			fail("relay to %s names no domain", r.To)
-		}
 		for _, d := range r.Domains {
 			if _, err := ParseRelayedDomain(d); err != nil {
 				fail("relay to %s: %v", r.To, err)
@@ -235,12 +300,22 @@ func validateInstance(inst *Instance, osName string, links []Link) []error {
 		}
 	}
 
-	for _, d := range inst.DNS {
-		if !reDomain.MatchString(d) {
-			fail("DNS domain %q is not a domain name", d)
-		}
+	if inst.DNS != nil && *inst.DNS && !inst.Shares() {
+		fail("dns: true is for an instance that shares its stacks, on a VPN")
 	}
 	return errs
+}
+
+// trustedNetwork is the network whose X-Forwarded-* headers the relay listener trusts: the interface's, or the shared
+// range for a single address in it.
+func trustedNetwork(ip net.IP, network *net.IPNet) (string, bool) {
+	if ones, bits := network.Mask.Size(); ones < bits {
+		return network.String(), true
+	}
+	if Shared.Contains(ip) {
+		return Shared.String(), true
+	}
+	return "", false
 }
 
 func validateTogether(instances []*Instance) []error {
@@ -263,6 +338,13 @@ func validateTogether(instances []*Instance) []error {
 			errs = append(errs, fmt.Errorf("instances %s and %s listen on the same address, %s", other, inst.Name, inst.Address))
 		}
 		addresses[key] = inst.Name
+		if inst.Loopback {
+			key := fmt.Sprintf("%s+%d", LoopbackAddress, inst.PortOffset)
+			if other, ok := addresses[key]; ok {
+				errs = append(errs, fmt.Errorf("instances %s and %s both listen on %s: one instance per machine serves its loopback", other, inst.Name, LoopbackAddress))
+			}
+			addresses[key] = inst.Name
+		}
 	}
 	if withoutProjects > 0 && len(instances) > 1 {
 		errs = append(errs, errors.New("with several instances, each one lists its projects (projects): an instance without a list would read them all"))
@@ -292,6 +374,33 @@ func ParseRelayedDomain(text string) (RelayedDomain, error) {
 	return RelayedDomain{Mode: mode, Domain: domain}, nil
 }
 
+// Shares tells whether the instance shares its stacks with other devices: a server's, which has a relay listener.
+func (inst *Instance) Shares() bool { return inst.RelayListener != nil }
+
+// ServesDNS tells whether the instance runs the VPN DNS: an instance that shares, unless `dns: false` (ADR-0003,
+// decision 8).
+func (inst *Instance) ServesDNS() bool { return inst.Shares() && (inst.DNS == nil || *inst.DNS) }
+
+// AddPorts adds legacy ports read from the projects' routes or learned from a server (ADR-0003, decisions 6 and 9), and
+// says why it skips the ones it cannot publish.
+func (inst *Instance) AddPorts(ports []int) (skipped []string) {
+	for _, p := range ports {
+		switch {
+		case p == 80 || inst.InCatalog(p):
+		case p < 1 || p+inst.PortOffset > 65535:
+			skipped = append(skipped, fmt.Sprintf("port %d does not exist", p))
+		case p == 53 && inst.ServesDNS():
+			skipped = append(skipped, "port 53 belongs to the VPN DNS")
+		case inst.RelayListener != nil && p == inst.RelayListener.Port:
+			skipped = append(skipped, fmt.Sprintf("port %d is the relay listener's", p))
+		default:
+			inst.Ports = append(inst.Ports, p)
+		}
+	}
+	sort.Ints(inst.Ports)
+	return skipped
+}
+
 // ServesProject tells whether this instance serves the project.
 func (inst *Instance) ServesProject(project string) bool {
 	if len(inst.Projects) == 0 {
@@ -318,6 +427,19 @@ func (inst *Instance) PublishedPorts() []int {
 		ports = append(ports, inst.RelayListener.Port)
 	}
 	return ports
+}
+
+// LoopbackAddress is where a machine's own browsers and agents reach its stacks.
+const LoopbackAddress = "127.0.0.1"
+
+// LoopbackPorts are the ports a server instance with loopback: true also publishes on 127.0.0.1, so that the machine's own
+// agents reach its stacks under their URLs (ADR-0003): the stacks' entry points, not the relay listener, which only
+// workstations reach, through the VPN.
+func (inst *Instance) LoopbackPorts() []int {
+	if !inst.Loopback {
+		return nil
+	}
+	return append([]int{80}, inst.TLSPorts()...)
 }
 
 // InCatalog tells whether a TLS port is an entry point of the instance.
@@ -351,8 +473,8 @@ func osLabel(s string) string {
 	return s
 }
 
-// HostLinks reads the machine's interfaces and recognizes WireGuard ones by their uevent (DEVTYPE=wireguard). Run in a
-// container, it needs `--network host` to see the host's.
+// HostLinks reads the machine's interfaces, and recognizes a VPN's: WireGuard by its uevent (DEVTYPE=wireguard), TUN
+// and TAP by their tun_flags. Run in a container, it needs `--network host` to see the host's.
 func HostLinks() ([]Link, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -361,8 +483,11 @@ func HostLinks() ([]Link, error) {
 	var links []Link
 	for _, iface := range ifaces {
 		l := Link{Name: iface.Name}
-		if uevent, err := os.ReadFile("/sys/class/net/" + iface.Name + "/uevent"); err == nil {
-			l.WireGuard = bytes.Contains(uevent, []byte("DEVTYPE=wireguard"))
+		sys := "/sys/class/net/" + iface.Name
+		if uevent, err := os.ReadFile(sys + "/uevent"); err == nil && bytes.Contains(uevent, []byte("DEVTYPE=wireguard")) {
+			l.Kind = WireGuard
+		} else if _, err := os.Stat(sys + "/tun_flags"); err == nil {
+			l.Kind = TUN
 		}
 		addrs, _ := iface.Addrs()
 		for _, a := range addrs {
