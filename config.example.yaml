@@ -1,27 +1,28 @@
-# waggle's configuration on one machine, to copy to ~/.config/waggle/config.yaml. That copy is not committed: it describes
-# this machine (see the README).
+# waggle's configuration on one machine, ~/.config/waggle/config.yaml. waggle setup writes it; this example shows the
+# keys it does not ask, for a configuration written by hand (see the README).
 
 instances:
 
-  # A WORKSTATION: one instance on loopback, which serves every project.
+  # A WORKSTATION: one instance on loopback, which serves every project. waggle up reads the projects' legacy ports in
+  # their routes.
   workstation:
     address: 127.0.0.1
-    # Legacy ports of an existing project, on top of 80 and 443; a new project needs none.
-    # ports: [3000, 3001]
-    # Relay to a server's waggle, through the VPN: what this workstation does not serve, it passes on.
+    # Relay to a server's waggle, through the VPN: what this workstation does not serve, it passes on. The server tells
+    # which domains, in which mode, and its legacy ports.
     # relays:
-    #   - to: 10.8.0.1                  # the server's WireGuard address
-    #     domains:
+    #   - to: 10.8.0.1                  # the server's address on the VPN
+    #     domains:                      # optional: replaces what the server tells
     #       - https://dev.example.com   # a domain waggle terminates
     #       - tls://dev.legacy.com      # a passthrough domain
     #       - http://localhost          # .localhost names
 
-  # A SERVER: one instance per VPN, on its WireGuard address. The interface is deduced from it, and the firewall rule too.
+  # A SERVER: one instance per VPN, on its address in that VPN, whatever the VPN. The interface is deduced from it, and
+  # the firewall rule too; the VPN DNS answers the names of the stacks it serves.
   # team:
   #   address: 10.8.0.1
   #   loopback: true                    # also on 127.0.0.1, for this server's own agents; one instance per machine
   #   projects: [my-project]            # with several instances, each one lists its projects
-  #   dns: [dev.example.com]            # the VPN DNS, for phones
   # clients:
-  #   address: 10.9.0.1
+  #   address: 100.101.102.103          # Tailscale, for example
   #   projects: [another-project]
+  #   dns: false                        # when port 53 of the address is already taken

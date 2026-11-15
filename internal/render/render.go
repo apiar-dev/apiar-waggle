@@ -5,7 +5,8 @@
 //     the Docker socket;
 //   - controller, the only one to mount the socket: it connects routed services, translates their routes, issues their
 //     certificates, and writes Traefik's configuration into a volume;
-//   - dns, when there are domains to resolve for the VPN (ADR-0001, decision 6);
+//   - dns, on an instance that shares its stacks: CoreDNS, which loads the zones the controller writes for the stacks it
+//     serves, and the list of domains it publishes to workstations (ADR-0003, decisions 8 and 9);
 //   - firewall, on a VPN address: the DOCKER-USER rule, put back each time Docker starts (ADR-0001, decision 4).
 package render
 
@@ -26,6 +27,8 @@ const (
 	CoreDNSImage = "coredns/coredns:1.11.3"
 	// DynamicDir is where Traefik reads, and the controller writes, the dynamic configuration.
 	DynamicDir = "/dynamic"
+	// ZonesDir is where CoreDNS reads, and the controller writes, the VPN DNS zones.
+	ZonesDir = "/dns"
 )
 
 type object = map[string]any
@@ -55,6 +58,18 @@ func Compose(inst *config.Instance, dir, image string, hashes map[string]string)
 	for _, p := range inst.LoopbackPorts() {
 		ports = append(ports, fmt.Sprintf("%s:%d:%d", config.LoopbackAddress, p+inst.PortOffset, p))
 	}
+	controllerCommand := []string{"controller", "--instance", "/state/instance.json", "--ca", "/state/ca"}
+	controllerVolumes := []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		dir + ":/state:ro",
+		"dynamic:" + DynamicDir,
+	}
+	volumes := object{"dynamic": object{"name": project + "-dynamic"}}
+	if inst.ServesDNS() {
+		controllerCommand = append(controllerCommand, "--zones", ZonesDir)
+		controllerVolumes = append(controllerVolumes, "zones:"+ZonesDir)
+		volumes["zones"] = object{"name": project + "-zones"}
+	}
 	services := object{
 		"traefik": object{
 			"image":    TraefikImage,
@@ -72,18 +87,14 @@ func Compose(inst *config.Instance, dir, image string, hashes map[string]string)
 			// A process as PID 1 ignores the stop signal, which Docker only enforces after ten seconds
 			"init":         true,
 			"network_mode": "none",
-			"command":      []string{"controller", "--instance", "/state/instance.json", "--ca", "/state/ca"},
-			"volumes": []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				dir + ":/state:ro",
-				"dynamic:" + DynamicDir,
-			},
-			"labels": labels("controller"),
+			"command":      controllerCommand,
+			"volumes":      controllerVolumes,
+			"labels":       labels("controller"),
 		},
 	}
 	networks := object{"waggle": object{"name": project}}
 
-	if len(inst.DNS) > 0 {
+	if inst.ServesDNS() {
 		services["dns"] = object{
 			"image":   CoreDNSImage,
 			"restart": "unless-stopped",
@@ -92,7 +103,7 @@ func Compose(inst *config.Instance, dir, image string, hashes map[string]string)
 				fmt.Sprintf("%s:%d:53/udp", inst.Address, 53+inst.PortOffset),
 				fmt.Sprintf("%s:%d:53/tcp", inst.Address, 53+inst.PortOffset),
 			},
-			"volumes":  []string{dir + "/Corefile:/Corefile:ro"},
+			"volumes":  []string{dir + "/Corefile:/Corefile:ro", "zones:" + ZonesDir + ":ro"},
 			"networks": []string{"dns"},
 			"labels":   labels("dns"),
 		}
@@ -116,7 +127,7 @@ func Compose(inst *config.Instance, dir, image string, hashes map[string]string)
 		"name":     project,
 		"services": services,
 		"networks": networks,
-		"volumes":  object{"dynamic": object{"name": project + "-dynamic"}},
+		"volumes":  volumes,
 	}
 }
 
@@ -141,19 +152,19 @@ func TraefikArgs(inst *config.Instance) []string {
 	)
 }
 
-// Corefile is the VPN DNS. It answers the instance address for its domains and everything below them, answers nothing
-// for AAAA, and forwards the rest (ADR-0001, decision 6).
+// Corefile is the VPN DNS. CoreDNS loads by itself the zones the controller writes, one per stack name it serves, and
+// forwards the rest (ADR-0003, decision 8). No cache: a stack's name answers as soon as it is served, and stops when it
+// is no longer.
 func Corefile(inst *config.Instance) string {
-	var b strings.Builder
-	b.WriteString("# Written by waggle: the VPN DNS of instance " + inst.Name + ".\n")
-	for _, d := range inst.DNS {
-		fmt.Fprintf(&b, "%s:53 {\n", d)
-		fmt.Fprintf(&b, "    template IN A {\n        answer \"{{ .Name }} 60 IN A %s\"\n    }\n", inst.Address)
-		b.WriteString("    template IN AAAA {\n        rcode NOERROR\n    }\n")
-		b.WriteString("    errors\n}\n")
-	}
-	b.WriteString(".:53 {\n    forward . /etc/resolv.conf\n    cache 30\n    errors\n}\n")
-	return b.String()
+	return "# Written by waggle: the VPN DNS of instance " + inst.Name + ". Its controller writes the zones into " + ZonesDir + ".\n" +
+		".:53 {\n" +
+		"    auto {\n" +
+		"        directory " + ZonesDir + " db\\.(.*) {1}\n" +
+		"        reload 2s\n" +
+		"    }\n" +
+		"    forward . /etc/resolv.conf\n" +
+		"    errors\n" +
+		"}\n"
 }
 
 // Hash is a short hash of some content.

@@ -25,7 +25,9 @@ import (
 	"github.com/apiar-dev/apiar-waggle/internal/controller"
 	"github.com/apiar-dev/apiar-waggle/internal/docker"
 	"github.com/apiar-dev/apiar-waggle/internal/firewall"
+	"github.com/apiar-dev/apiar-waggle/internal/publish"
 	"github.com/apiar-dev/apiar-waggle/internal/render"
+	"github.com/apiar-dev/apiar-waggle/internal/routes"
 )
 
 // Version is set at build time.
@@ -33,6 +35,8 @@ var Version = "dev"
 
 const usage = `waggle — a machine's dev routing, shared by the projects, never on the internet
 
+  setup              ask this machine's configuration, with what it detects as the answers, and write it
+                     (--share none|<interface> on Linux, --relay <server>|none: the answers, without a terminal)
   up                 read the configuration, write and start each instance; run again, it only changes what changed
   down               stop and remove the instances' containers, keeping their authority and configuration
   uninstall          remove the instances and their volumes; --all also removes their authority
@@ -52,6 +56,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "setup":
+		err = setup(os.Args[2:])
 	case "up":
 		err = up()
 	case "down":
@@ -112,9 +118,16 @@ func up() error {
 	}
 	image := env("WAGGLE_IMAGE", "waggle:local")
 	hostname := env("WAGGLE_HOSTNAME", "this machine")
+	ctx := context.Background()
+	labeled, err := docker.New("/var/run/docker.sock").AllContainers(ctx, controller.ProjectLabel)
+	if err != nil {
+		fmt.Printf("waggle: the projects' routes cannot be read (%v): only the configuration's ports are published\n", err)
+	}
 	wanted := map[string]bool{}
 	for _, inst := range insts {
 		wanted[inst.Name] = true
+		declaredPorts(inst, labeled)
+		learnRelays(ctx, inst, filepath.Join(state, inst.Name))
 		if err := prepare(inst, filepath.Join(state, inst.Name), image, hostname); err != nil {
 			return fmt.Errorf("instance %s: %w", inst.Name, err)
 		}
@@ -168,7 +181,7 @@ func prepare(inst *config.Instance, dir, image, hostname string) error {
 		return err
 	}
 	hashes["controller.instance"] = render.Hash(instJSON)
-	if len(inst.DNS) > 0 {
+	if inst.ServesDNS() {
 		corefile := []byte(render.Corefile(inst))
 		if err := os.WriteFile(filepath.Join(dir, "Corefile"), corefile, 0o644); err != nil {
 			return err
@@ -195,16 +208,79 @@ func summarize(inst *config.Instance, dir string) {
 	if inst.Loopback {
 		fmt.Printf("  and on %s, for this machine's own browsers and agents\n", config.LoopbackAddress)
 	}
-	if len(inst.DNS) > 0 {
-		fmt.Printf("  VPN DNS, on %s:%d, for %s\n", inst.Address, 53+inst.PortOffset, strings.Join(inst.DNS, ", "))
+	if inst.ServesDNS() {
+		fmt.Printf("  VPN DNS, on %s:%d: the names of its stacks, and the list of its domains, for workstations\n", inst.Address, 53+inst.PortOffset)
 	}
 	if inst.Interface != "" {
 		fmt.Printf("  firewall: %s\n", firewall.Command(inst.Address, inst.Interface))
 	}
 	for _, r := range inst.Relays {
-		fmt.Printf("  relay to %s: %s\n", r.To, strings.Join(r.Domains, ", "))
+		how := ""
+		if r.Learned {
+			how = ", as it publishes them"
+		}
+		domains := strings.Join(r.Domains, ", ")
+		if domains == "" {
+			domains = "nothing yet"
+		}
+		fmt.Printf("  relay to %s%s: %s\n", r.To, how, domains)
 	}
 	fmt.Printf("  authority, to trust on each device: %s\n", filepath.Join(dir, "ca", "ca.crt"))
+}
+
+// declaredPorts adds to the instance the legacy ports its projects' routes need, on their containers, running or not
+// (ADR-0003, decision 6).
+func declaredPorts(inst *config.Instance, labeled []docker.Summary) {
+	var ports []int
+	for _, c := range labeled {
+		if inst.ServesProject(c.Labels[controller.ProjectLabel]) {
+			ports = append(ports, routes.DeclaredPorts(c.Labels[routes.Label])...)
+		}
+	}
+	for _, why := range inst.AddPorts(ports) {
+		fmt.Printf("waggle: instance %s: a route asks for a port it cannot publish: %s\n", inst.Name, why)
+	}
+}
+
+// learnedFile keeps, per server, the last list it published: with the VPN down, a workstation still relays.
+const learnedFile = "learned.json"
+
+// learnRelays reads, for each relay without domains, the list its server publishes, and adds its ports (ADR-0003,
+// decision 9). A server that does not answer leaves the last list read.
+func learnRelays(ctx context.Context, inst *config.Instance, dir string) {
+	learned := map[string]publish.List{}
+	path := filepath.Join(dir, learnedFile)
+	if content, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(content, &learned)
+	}
+	changed := false
+	for i := range inst.Relays {
+		r := &inst.Relays[i]
+		if len(r.Domains) > 0 {
+			continue
+		}
+		r.Learned = true
+		list, err := publish.Lookup(ctx, r.To, 53+r.PortOffset)
+		if err != nil {
+			former, ok := learned[r.To]
+			if !ok {
+				fmt.Printf("waggle: relay to %s: %v; nothing is relayed until waggle up reaches it\n", r.To, err)
+				continue
+			}
+			fmt.Printf("waggle: relay to %s: %v; the list it published before stays\n", r.To, err)
+			list = former
+		} else {
+			learned[r.To], changed = list, true
+		}
+		r.Domains = list.Domains
+		for _, why := range inst.AddPorts(list.Ports) {
+			fmt.Printf("waggle: relay to %s: %s\n", r.To, why)
+		}
+	}
+	if changed && os.MkdirAll(dir, 0o700) == nil {
+		content, _ := json.MarshalIndent(learned, "", "  ")
+		os.WriteFile(path, append(content, '\n'), 0o644)
+	}
 }
 
 func composeAll(args ...string) error {
@@ -277,8 +353,33 @@ func status() error {
 			return err
 		}
 		fmt.Printf("  authority: %s\n", filepath.Join(dir, "ca", "ca.crt"))
+		staleRelays(inst, dir)
 	}
 	return nil
+}
+
+// staleRelays says when a server now publishes domains or ports this workstation does not relay yet.
+func staleRelays(inst *config.Instance, dir string) {
+	learned := map[string]publish.List{}
+	if content, err := os.ReadFile(filepath.Join(dir, learnedFile)); err == nil {
+		json.Unmarshal(content, &learned)
+	}
+	for _, r := range inst.Relays {
+		if len(r.Domains) > 0 {
+			continue
+		}
+		now, err := publish.Lookup(context.Background(), r.To, 53+r.PortOffset)
+		if err != nil {
+			fmt.Printf("  relay to %s: %v\n", r.To, err)
+			continue
+		}
+		before := learned[r.To]
+		if fmt.Sprint(now) != fmt.Sprint(before) {
+			fmt.Printf("  relay to %s: the server now publishes %s, ports %v: run waggle up\n", r.To, strings.Join(now.Domains, ", "), now.Ports)
+		} else {
+			fmt.Printf("  relay to %s: %s\n", r.To, strings.Join(now.Domains, ", "))
+		}
+	}
 }
 
 func printCA(args []string) error {
@@ -330,6 +431,7 @@ func runController(args []string) error {
 	instancePath := fs.String("instance", "/state/instance.json", "the instance's validated configuration")
 	caDir := fs.String("ca", "/state/ca", "the authority directory")
 	dynamic := fs.String("dynamic", render.DynamicDir, "the directory Traefik reads")
+	zones := fs.String("zones", "", "the directory of the VPN DNS zones, on an instance that runs it")
 	socket := fs.String("socket", "/var/run/docker.sock", "the Docker socket")
 	fs.Parse(args)
 	inst, a, err := controller.Load(*instancePath, *caDir)
@@ -340,14 +442,14 @@ func runController(args []string) error {
 	defer stop()
 	logger := log.New(os.Stdout, "", log.Ltime)
 	logger.Printf("controller of instance %s, on %s", inst.Name, inst.Address)
-	c := &controller.Controller{Instance: inst, CA: a, Docker: docker.New(*socket), Dir: *dynamic, Log: logger}
+	c := &controller.Controller{Instance: inst, CA: a, Docker: docker.New(*socket), Dir: *dynamic, Zones: *zones, Log: logger}
 	return c.Run(ctx)
 }
 
 func runFirewall(args []string) error {
 	fs := flag.NewFlagSet("firewall", flag.ExitOnError)
 	address := fs.String("address", "", "the VPN address")
-	iface := fs.String("interface", "", "its WireGuard interface")
+	iface := fs.String("interface", "", "its VPN interface")
 	once := fs.Bool("once", false, "put the rule, then return")
 	interval := fs.Duration("interval", 15*time.Second, "the time between two checks")
 	fs.Parse(args)

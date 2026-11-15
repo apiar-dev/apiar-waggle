@@ -1,7 +1,7 @@
 # Les essais qui demandent un serveur ou un appareil
 
 Ces essais ne se font pas sur un Mac seul. Ils sont préparés ici, à lancer à la main, une fois
-waggle installé (`install.sh`, puis `waggle up`). Chacun dit ce qu'il établit, comment le lancer, et
+waggle installé (`install.sh`, puis les réponses de `waggle setup`). Chacun dit ce qu'il établit, comment le lancer, et
 ce qu'on attend.
 
 Ce qu'un Mac seul pouvait éprouver l'est déjà, par `make integration` et `make firewall`. En
@@ -66,8 +66,20 @@ Sur le serveur : `ss -lunpt | grep ':53 '`. Il est attendu que seul `systemd-res
 écoute, sur `127.0.0.53` et `127.0.0.54`. Un service à l'écoute sur `0.0.0.0:53` empêcherait
 la publication, et `waggle up` le dirait.
 
-Puis, depuis le Mac, tunnel actif : `dig +short @10.8.0.1 <dossier>.<domaine du DNS>`. Attendu :
-`10.8.0.1`.
+Puis, depuis le Mac, tunnel actif, une stack levée sur le serveur :
+
+```bash
+dig +short @10.8.0.1 <dossier>.<domaine>
+```
+
+Attendu : `10.8.0.1`. Puis `dig +short @10.8.0.1 www.<domaine>` : la vraie réponse du domaine, pas
+`10.8.0.1` (ADR-0003, décision 8). Et la liste que le serveur publie à ses postes :
+
+```bash
+dig +short @10.8.0.1 relay.waggle TXT
+```
+
+Attendu : une ligne par domaine servi, avec son mode, et ses ports historiques (décision 9).
 
 ## 3. Un conteneur de Docker Desktop joint l'adresse du serveur par le tunnel du Mac
 
@@ -203,3 +215,22 @@ TLS, `curl` doit faire confiance à l'autorité du projet ; en HTTPS terminé pa
 de l'instance (`waggle ca team`).
 
 Puis Playwright, ou le navigateur qu'un agent pilote, sur la même URL.
+
+## 8. Le VPS sous un autre VPN que WireGuard, Tailscale par exemple
+
+**Ce qu'il établit.** waggle prend le VPN qui est là (ADR-0003, décision 7).
+
+Sur le serveur, Tailscale levé :
+1. `waggle setup` propose `tailscale0 (Tailscale), 100.x.y.z`. Attendu : l'instance sur cette
+   adresse, avec `loopback: true`, et un relais qui fait confiance à `100.64.0.0/10`.
+2. La règle de waggle à côté des chaînes de Tailscale :
+   `sudo iptables -S FORWARD | head -5`, puis l'essai 1, avec `tailscale0` à la place de
+   `wg0`. Attendu : le membre du tailnet servi, le voisin refusé.
+
+Sur le Mac, Tailscale levé :
+1. L'essai 3, vers l'adresse Tailscale du serveur : un conteneur de Docker Desktop la joint.
+2. `waggle setup`, avec l'adresse du serveur : il dit ce que le serveur sert. Puis une stack du
+   serveur, dans le navigateur du Mac, sous son URL.
+
+Sur le téléphone : dans la console de Tailscale, DNS → un serveur de noms, l'adresse du serveur,
+restreint au domaine de dev. Puis l'essai 5, sans l'app WireGuard.

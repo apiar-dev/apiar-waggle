@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs waggle on this machine, macOS or Linux, or upgrades it: run it again, it brings the clone to the wanted
-# version, rebuilds the image and restarts what changed (README, ADR-0003).
+# version, rebuilds the image and restarts what changed. The first time, waggle setup asks the configuration
+# (README, ADR-0003, decision 6).
 #
 #   gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
 #
@@ -10,6 +11,7 @@
 #   WAGGLE_HOME      the clone, ~/.local/share/waggle by default;
 #   WAGGLE_BIN       the directory the command is linked into, ~/.local/bin by default;
 #   WAGGLE_CONFIG    the configuration file, ~/.config/waggle/config.yaml by default, as for the command;
+#   WAGGLE_SETUP     the answers to waggle setup, for an install without a terminal: "--share tailscale0", for example;
 #   WAGGLE_NO_TRUST  1: leave the macOS keychain alone (tests, unattended installs).
 #
 # Everything sits in main, called on the last line: a download cut short runs nothing.
@@ -96,47 +98,6 @@ path_hint() {
 	printf '\n  %s\n\n' "$line"
 }
 
-# The IPv4 addresses of this machine's WireGuard interfaces, one per line
-wireguard_addresses() {
-	for dev in /sys/class/net/*; do
-		grep -qsx 'DEVTYPE=wireguard' "$dev/uevent" || continue
-		ip -4 -o addr show dev "${dev##*/}" 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }'
-	done
-}
-
-# linux_config: the configuration a Linux machine gets without asking (ADR-0003, decision 6). With one WireGuard
-# interface, the instance of that VPN, which also serves the machine's own agents on loopback; with none, loopback only.
-# With several, nothing: one instance per VPN, written by hand.
-linux_config() {
-	addresses=$(wireguard_addresses)
-	case "$(printf '%s' "$addresses" | grep -c .)" in
-	0)
-		cat <<EOF
-# Written by install.sh: no WireGuard interface, so this machine serves its own browsers and agents, on loopback (README).
-instances:
-  local:
-    address: 127.0.0.1
-    # Legacy ports of the projects, on top of 80 and 443
-    # ports: [3000]
-EOF
-		;;
-	1)
-		cat <<EOF
-# Written by install.sh: this machine's VPN, on its WireGuard address, and its own loopback, for its agents (README).
-instances:
-  vpn:
-    address: $addresses
-    loopback: true
-    # Legacy ports of the projects, on top of 80 and 443
-    # ports: [3000]
-    # The domains the VPN DNS resolves to this machine, for phones
-    # dns: [dev.example.com]
-EOF
-		;;
-	*) return 1 ;;
-	esac
-}
-
 main() {
 	os=$(uname -s)
 	ref=${WAGGLE_REF:-main}
@@ -148,31 +109,29 @@ main() {
 	fetch
 	link
 
-	# The configuration, when there is none: a Mac is a workstation, and the example's instance is all it needs. A Linux
-	# machine gets the one its WireGuard interfaces tell; with several VPNs, it is written by hand.
-	if [ ! -f "$config" ]; then
-		mkdir -p "$(dirname -- "$config")"
-		if [ "$os" = Darwin ]; then
-			cp "$home/config.example.yaml" "$config"
-			say "configuration written to $config: one workstation instance, on 127.0.0.1"
-		elif linux_config >"$config.tmp"; then
-			mv "$config.tmp" "$config"
-			say "configuration written to $config:"
-			grep -v '^ *#' "$config" | sed 's/^/    /'
-		else
-			rm -f "$config.tmp"
-			say "this machine has several WireGuard interfaces: write its configuration by hand, one instance per VPN:"
-			printf '\n  cp %s %s\n\n' "$home/config.example.yaml" "$config"
-			say "then run this again (the README describes a server's configuration)."
-			path_hint
-			return 0
+	if [ -f "$config" ]; then
+		say "starting the instances; the first build of waggle's image takes a minute or two"
+		"$home/bin/waggle" up </dev/null
+		if [ "$os" = Darwin ] && [ "${WAGGLE_NO_TRUST:-}" != 1 ]; then
+			"$home/bin/waggle" trust
 		fi
-	fi
-
-	say "starting the instances; the first build of waggle's image takes a minute or two"
-	"$home/bin/waggle" up </dev/null
-	if [ "$os" = Darwin ] && [ "${WAGGLE_NO_TRUST:-}" != 1 ]; then
-		"$home/bin/waggle" trust
+	elif [ -n "${WAGGLE_SETUP:-}" ]; then
+		# shellcheck disable=SC2086 # the answers split into options
+		"$home/bin/waggle" setup $WAGGLE_SETUP </dev/null
+	elif (: </dev/tty) 2>/dev/null; then
+		# This script comes through a pipe: the answers come from the terminal
+		say "no configuration yet: waggle setup asks it; the first build of waggle's image takes a minute or two"
+		"$home/bin/waggle" setup </dev/tty
+	elif [ "$os" = Darwin ]; then
+		# Without a terminal, a Mac's answer is harmless: a workstation, without relay
+		"$home/bin/waggle" setup </dev/null
+	else
+		say "no configuration yet, and no terminal to ask it: give waggle setup its answers, for example"
+		printf '\n  %s setup --share none   # this machine serves its own agents only\n' "$bin/waggle"
+		printf '  %s setup --share wg0    # other devices reach it through wg0\n\n' "$bin/waggle"
+		say "or run this again with WAGGLE_SETUP=\"--share wg0\"."
+		path_hint
+		return 0
 	fi
 	path_hint
 	say "done. Run this again to upgrade."

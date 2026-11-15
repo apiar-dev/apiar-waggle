@@ -6,7 +6,8 @@
 // Two instances on this machine, on offset ports so they run next to whatever already listens:
 //   - "workstation" (+20000) terminates its stacks' TLS, serves plain HTTP on p80 and passthrough, and relays to the
 //     "server" what it does not serve, through host.docker.internal, as it would to a WireGuard address;
-//   - "server" (+30000) has a relay entry point, and a VPN DNS.
+//   - "server" (+30000) has a relay entry point, and a VPN DNS, which answers the names of its stacks and publishes its
+//     domains; at the end, the workstation learns them from it.
 //
 // Everything is removed at the end: stacks, instances, their volumes, their authority, the .tests/<id> directory.
 package integration
@@ -35,6 +36,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/apiar-dev/apiar-waggle/internal/ca"
+	"github.com/apiar-dev/apiar-waggle/internal/publish"
 )
 
 const (
@@ -130,41 +132,11 @@ func setup() error {
 		os.WriteFile(filepath.Join(dir, "project", name+".key"), k, 0o644)
 	}
 
-	cfg := fmt.Sprintf(`instances:
-  %[1]s-workstation:
-    address: 127.0.0.1
-    port_offset: %[2]d
-    ports: [3000]
-    projects: [%[1]s-w]
-    relays:
-      - to: host.docker.internal
-        port_offset: %[3]d
-        domains: [https://example.test, tls://legacy.test, http://localhost]
-  %[1]s-server:
-    address: 127.0.0.1
-    port_offset: %[3]d
-    ports: [3000]
-    projects: [%[1]s-s]
-    dns: [example.test]
-    relay_listener: {port: 8080, trusted_ips: [0.0.0.0/0]}
-`, id, workstationOffset, serverOffset)
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+	// The ports come from the stacks' routes (3000), and the workstation's domains are written: it learns them at the end,
+	// in TestLearnedRelays
+	if err := writeConfig("        domains: [https://example.test, tls://legacy.test, http://localhost]\n"); err != nil {
 		return err
 	}
-	out, err := waggle("up")
-	if err != nil {
-		return err
-	}
-	log.Print(out)
-	for inst, pool := range map[string]**x509.CertPool{"workstation": &workstationCA, "server": &serverCA} {
-		pem, err := os.ReadFile(filepath.Join(dir, "state", id+"-"+inst, "ca", "ca.crt"))
-		if err != nil {
-			return err
-		}
-		*pool = x509.NewCertPool()
-		(*pool).AppendCertsFromPEM(pem)
-	}
-
 	stacks := map[string]map[string]string{
 		"w-a": {
 			"front": "https://{stack}.example.test/ 8080\nhttps://{stack}.example.test:3000/ 8081\nhttps://api.{stack}.example.test/ 8080\nhttp://admin.{stack}.localhost/ 8080",
@@ -184,6 +156,20 @@ func setup() error {
 		if _, err := run(nil, "docker", "compose", "-f", filepath.Join(dir, stack(letter), "compose.yaml"), "up", "-d", "--quiet-pull"); err != nil {
 			return err
 		}
+	}
+	// The stacks first: waggle up reads the legacy ports in their routes
+	out, err := waggle("up")
+	if err != nil {
+		return err
+	}
+	log.Print(out)
+	for inst, pool := range map[string]**x509.CertPool{"workstation": &workstationCA, "server": &serverCA} {
+		pem, err := os.ReadFile(filepath.Join(dir, "state", id+"-"+inst, "ca", "ca.crt"))
+		if err != nil {
+			return err
+		}
+		*pool = x509.NewCertPool()
+		(*pool).AppendCertsFromPEM(pem)
 	}
 	// The controller sees the stacks, connects, writes; Traefik reloads, at most every two seconds. Every stack answers
 	// before the tests start
@@ -209,6 +195,24 @@ func setup() error {
 		}
 		return nil
 	}, 90*time.Second)
+}
+
+func writeConfig(domains string) error {
+	cfg := fmt.Sprintf(`instances:
+  %[1]s-workstation:
+    address: 127.0.0.1
+    port_offset: %[2]d
+    projects: [%[1]s-w]
+    relays:
+      - to: host.docker.internal
+        port_offset: %[3]d
+%[4]s  %[1]s-server:
+    address: 127.0.0.1
+    port_offset: %[3]d
+    projects: [%[1]s-s]
+    relay_listener: {port: 8080, trusted_ips: [0.0.0.0/0]}
+`, id, workstationOffset, serverOffset, domains)
+	return os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644)
 }
 
 func writeStack(letter string, services map[string]string) error {
@@ -452,20 +456,43 @@ func TestAPhoneOnTheServer(t *testing.T) {
 	}
 }
 
+// The VPN DNS answers the names of the stacks the server serves, and everything below them, never a whole domain; it
+// forwards the rest, and publishes the server's domains for workstations (ADR-0003, decisions 8 and 9).
 func TestVPNDNS(t *testing.T) {
-	for _, proto := range []string{"udp", "tcp"} {
-		rcode, ips, err := query(proto, stack("s-r")+".example.test", 1)
-		if err != nil || rcode != 0 || len(ips) != 1 || ips[0] != "127.0.0.1" {
-			t.Errorf("%s, A: rcode %d, %v, %v; want the instance address", proto, rcode, ips, err)
+	// CoreDNS loads a new zone within two seconds
+	err := waitFor(func() error {
+		_, ips, err := query("udp", stack("s-r")+".example.test", 1)
+		if err != nil || len(ips) != 1 {
+			return fmt.Errorf("%v %v", ips, err)
 		}
-		rcode, ips, err = query(proto, stack("s-r")+".example.test", 28)
+		return nil
+	}, 20*time.Second)
+	if err != nil {
+		t.Fatalf("the zone of a served stack: %v", err)
+	}
+	for _, proto := range []string{"udp", "tcp"} {
+		for _, name := range []string{stack("s-r") + ".example.test", "api." + stack("s-r") + ".example.test", stack("s-q") + ".legacy.test"} {
+			rcode, ips, err := query(proto, name, 1)
+			if err != nil || rcode != 0 || len(ips) != 1 || ips[0] != "127.0.0.1" {
+				t.Errorf("%s, A %s: rcode %d, %v, %v; want the instance address", proto, name, rcode, ips, err)
+			}
+		}
+		rcode, ips, err := query(proto, stack("s-r")+".example.test", 28)
 		if err != nil || rcode != 0 || len(ips) != 0 {
 			t.Errorf("%s, AAAA: rcode %d, %v, %v; want NOERROR and nothing", proto, rcode, ips, err)
 		}
 	}
+	if _, ips, _ := query("udp", "nobody.example.test", 1); len(ips) != 0 {
+		t.Errorf("a name no stack serves is not the server's: %v", ips)
+	}
 	rcode, ips, err := query("udp", "example.com", 1)
 	if err != nil || rcode != 0 || len(ips) == 0 {
 		t.Errorf("the rest is forwarded: rcode %d, %v, %v", rcode, ips, err)
+	}
+	list, err := publish.Lookup(context.Background(), host, 53+serverOffset)
+	want := "[http://localhost https://example.test tls://legacy.test] [3000]"
+	if err != nil || fmt.Sprint(list.Domains, " ", list.Ports) != want {
+		t.Errorf("the published list: %v %v; want %s", list, err, want)
 	}
 }
 
@@ -508,6 +535,36 @@ func TestRunAgain(t *testing.T) {
 	}
 	status, body, _, err := get("https", stack("w-a")+".example.test", 443+workstationOffset, "/", workstationCA)
 	expect(t, "controller restarted, routes hold", status, body, err, stack("w-a")+" front")
+}
+
+// A workstation whose relay names no domain learns them from the server, at waggle up (ADR-0003, decision 9).
+func TestLearnedRelays(t *testing.T) {
+	if err := writeConfig(""); err != nil {
+		t.Fatal(err)
+	}
+	out, err := waggle("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "as it publishes them: http://localhost, https://example.test, tls://legacy.test") {
+		t.Errorf("waggle up says what the workstation learned:\n%s", out)
+	}
+	err = waitFor(func() error {
+		status, body, _, err := get("https", stack("s-r")+".example.test", 443+workstationOffset, "/", workstationCA)
+		if err != nil || status != 200 || !strings.Contains(body, stack("s-r")+" front 8080") {
+			return fmt.Errorf("%d %q %v", status, body, err)
+		}
+		return nil
+	}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("https relay, learned: %v", err)
+	}
+	status, body, _, err := get("https", stack("s-r")+".example.test", 3000+workstationOffset, "/", workstationCA)
+	expect(t, "https relay from a legacy port, learned", status, body, err, stack("s-r")+" front 8081")
+	status, body, _, err = get("https", stack("s-q")+".legacy.test", 443+workstationOffset, "/", projectCA)
+	expect(t, "passthrough relay, learned", status, body, err, stack("s-q")+" front passthrough")
+	status, body, _, err = get("http", stack("s-r")+".localhost", 80+workstationOffset, "/", nil)
+	expect(t, "http relay, learned", status, body, err, stack("s-r")+" front 8080")
 }
 
 // query asks the server's DNS a question, and returns the response code and the addresses.

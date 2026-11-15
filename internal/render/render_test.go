@@ -34,7 +34,7 @@ func TestWorkstation(t *testing.T) {
 		t.Error("a workstation has no firewall")
 	}
 	if _, ok := s["dns"]; ok {
-		t.Error("a workstation without domains has no DNS")
+		t.Error("a workstation, which shares nothing, has no DNS")
 	}
 	ports := strs(s["traefik"]["ports"])
 	if !slices.Equal(ports, []string{"127.0.0.1:80:80", "127.0.0.1:443:443", "127.0.0.1:3000:3000"}) {
@@ -55,7 +55,7 @@ func TestWorkstation(t *testing.T) {
 
 func TestServer(t *testing.T) {
 	inst := &config.Instance{
-		Name: "team", Address: "10.8.0.1", Interface: "wg0", DNS: []string{"dev.example.com"},
+		Name: "team", Address: "10.8.0.1", Interface: "wg0",
 		RelayListener: &config.RelayListener{Port: 8080, TrustedIPs: []string{"10.8.0.0/24"}},
 	}
 	s := services(t, Compose(inst, "/state/team", "waggle:local", nil))
@@ -68,6 +68,12 @@ func TestServer(t *testing.T) {
 	}
 	if !slices.Equal(strs(s["dns"]["ports"]), []string{"10.8.0.1:53:53/udp", "10.8.0.1:53:53/tcp"}) {
 		t.Errorf("DNS on the VPN address: %v", s["dns"]["ports"])
+	}
+	if !slices.Contains(strs(s["dns"]["volumes"]), "zones:/dns:ro") || !slices.Contains(strs(s["controller"]["volumes"]), "zones:/dns") {
+		t.Errorf("the controller writes the zones CoreDNS reads: %v, %v", s["dns"]["volumes"], s["controller"]["volumes"])
+	}
+	if !slices.Equal(strs(s["controller"]["command"])[5:], []string{"--zones", "/dns"}) {
+		t.Errorf("the controller is told where to write the zones: %v", s["controller"]["command"])
 	}
 	if !slices.Contains(strs(s["traefik"]["ports"]), "10.8.0.1:8080:8080") {
 		t.Error("the relay listener is published on the VPN address")
@@ -85,6 +91,11 @@ func TestServer(t *testing.T) {
 	if slices.Contains(looped, "127.0.0.1:8080:8080") {
 		t.Errorf("the relay listener stays on the VPN address: %v", looped)
 	}
+	off := false
+	inst.DNS = &off
+	if _, ok := services(t, Compose(inst, "/state/team", "waggle:local", nil))["dns"]; ok {
+		t.Error("dns: false: no DNS")
+	}
 	args := TraefikArgs(inst)
 	if !slices.Contains(args, "--entrypoints.relay.forwardedHeaders.trustedIPs=10.8.0.0/24") {
 		t.Errorf("the relay listener only trusts the VPN: %v", args)
@@ -92,9 +103,9 @@ func TestServer(t *testing.T) {
 }
 
 func TestPortOffset(t *testing.T) {
-	inst := &config.Instance{Name: "test", Address: "127.0.0.1", PortOffset: 20000, DNS: []string{"test.example"}}
+	inst := &config.Instance{Name: "test", Address: "127.0.0.1", PortOffset: 20000, RelayListener: &config.RelayListener{Port: 8080}}
 	s := services(t, Compose(inst, "/s", "w", nil))
-	if !slices.Equal(strs(s["traefik"]["ports"]), []string{"127.0.0.1:20080:80", "127.0.0.1:20443:443"}) {
+	if !slices.Equal(strs(s["traefik"]["ports"]), []string{"127.0.0.1:20080:80", "127.0.0.1:20443:443", "127.0.0.1:28080:8080"}) {
 		t.Errorf("offset: %v", s["traefik"]["ports"])
 	}
 	if strs(s["dns"]["ports"])[0] != "127.0.0.1:20053:53/udp" {
@@ -103,8 +114,8 @@ func TestPortOffset(t *testing.T) {
 }
 
 func TestCorefile(t *testing.T) {
-	c := Corefile(&config.Instance{Name: "team", Address: "10.8.0.1", DNS: []string{"dev.example.com"}})
-	for _, part := range []string{"dev.example.com:53 {", `answer "{{ .Name }} 60 IN A 10.8.0.1"`, "template IN AAAA", "rcode NOERROR", "forward . /etc/resolv.conf"} {
+	c := Corefile(&config.Instance{Name: "team", Address: "10.8.0.1"})
+	for _, part := range []string{"auto {", `directory /dns db\.(.*) {1}`, "reload 2s", "forward . /etc/resolv.conf"} {
 		if !strings.Contains(c, part) {
 			t.Errorf("the Corefile lacks %q:\n%s", part, c)
 		}

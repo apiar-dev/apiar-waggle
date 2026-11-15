@@ -186,7 +186,67 @@ func TestCatalog(t *testing.T) {
 	if err := c.Rebuild(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(routers(t, c)) != 1 || !strings.Contains(logs.String(), "port 4000 is not in the instance catalog") {
+	if len(routers(t, c)) != 1 || !strings.Contains(logs.String(), "does not publish port 4000 yet: run waggle up") {
 		t.Errorf("a port outside the catalog is refused:\n%s", logs)
+	}
+}
+
+// A server's controller writes the VPN DNS: a zone per stack name under a real domain, never one for .localhost, and the
+// list of the domains it has served, which only grows (ADR-0003, decisions 8 and 9).
+func TestZones(t *testing.T) {
+	inst := &config.Instance{Name: "team", Address: "10.8.0.1", Ports: []int{3000},
+		RelayListener: &config.RelayListener{Port: 8080, TrustedIPs: []string{"10.8.0.0/24"}}}
+	c, f, _ := setup(t, inst)
+	c.Zones = t.TempDir()
+	f.add("1", "a-front-1", "p", "a", "https://{stack}.dev.example.com/ 80\nhttp://admin.{stack}.localhost/ 80", 1)
+	f.add("2", "b-front-1", "p", "b", "tls://{stack}.dev.legacy.com:3000 443", 2)
+	if err := c.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	names := func() []string {
+		var l []string
+		entries, _ := os.ReadDir(c.Zones)
+		for _, e := range entries {
+			l = append(l, e.Name())
+		}
+		return l
+	}
+	if got := names(); !slices.Equal(got, []string{"db.a.dev.example.com", "db.b.dev.legacy.com", "db.waggle", "published.json"}) {
+		t.Fatalf("a zone per stack name, none for .localhost: %v", got)
+	}
+	zone, _ := os.ReadFile(filepath.Join(c.Zones, "db.a.dev.example.com"))
+	for _, part := range []string{"$ORIGIN a.dev.example.com.", "IN SOA", "@ 10 IN A 10.8.0.1", "* 10 IN A 10.8.0.1"} {
+		if !strings.Contains(string(zone), part) {
+			t.Errorf("the zone lacks %q:\n%s", part, zone)
+		}
+	}
+	if info, _ := os.Stat(filepath.Join(c.Zones, "db.waggle")); info.Mode().Perm() != 0o644 {
+		t.Errorf("CoreDNS, another user, reads the zones: %v", info.Mode())
+	}
+	relay, _ := os.ReadFile(filepath.Join(c.Zones, "db.waggle"))
+	for _, part := range []string{`relay 10 IN TXT "https dev.example.com"`, `relay 10 IN TXT "http localhost"`,
+		`relay 10 IN TXT "tls dev.legacy.com"`, `relay 10 IN TXT "ports 3000"`} {
+		if !strings.Contains(string(relay), part) {
+			t.Errorf("the published list lacks %q:\n%s", part, relay)
+		}
+	}
+
+	// Stack b stops: its zone goes, its domain stays published; a new mode for a domain replaces the former one
+	delete(f.containers, "2")
+	f.add("3", "c-front-1", "p", "c", "tls://{stack}.dev.example.com 443", 3)
+	delete(f.containers, "1")
+	if err := c.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(); !slices.Equal(got, []string{"db.c.dev.example.com", "db.waggle", "published.json"}) {
+		t.Fatalf("a stopped stack loses its zone: %v", got)
+	}
+	relay2, _ := os.ReadFile(filepath.Join(c.Zones, "db.waggle"))
+	if !strings.Contains(string(relay2), `"tls dev.legacy.com"`) || !strings.Contains(string(relay2), `"http localhost"`) ||
+		!strings.Contains(string(relay2), `"tls dev.example.com"`) || strings.Contains(string(relay2), `"https dev.example.com"`) {
+		t.Errorf("the list keeps the domains served before, in their current mode:\n%s", relay2)
+	}
+	if string(relay) == string(relay2) || strings.Split(string(relay), "\n")[2] == strings.Split(string(relay2), "\n")[2] {
+		t.Error("a changed zone has a new serial, for CoreDNS to reload it")
 	}
 }
