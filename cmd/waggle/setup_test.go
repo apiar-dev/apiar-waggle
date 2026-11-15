@@ -112,9 +112,25 @@ func TestSetupQuestions(t *testing.T) {
 	if !strings.Contains(out.String(), "reachable from the internet") {
 		t.Errorf("another interface comes with a warning:\n%s", out)
 	}
-	p, _ = answer("none\n")
+	p, out = answer("\n")
+	if got := p.relayQuestion(none); got != none {
+		t.Errorf("no server, by default: %q", got)
+	}
+	for _, want := range []string{"open its stacks from this machine?", "1. No: this machine opens its own stacks only", "[1]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the relay question shows %q:\n%s", want, out)
+		}
+	}
+	p, _ = answer("1\n")
 	if got := p.relayQuestion("10.8.0.1"); got != none {
-		t.Errorf("none removes the relay: %q", got)
+		t.Errorf("no removes the relay: %q", got)
+	}
+	p, out = answer("2\n\nhttps://10.8.0.1:53\nnone\n127.0.0.1\n")
+	if got := p.relayQuestion(none); got != "127.0.0.1" {
+		t.Errorf("yes asks the address, until it is one: %q", got)
+	}
+	if !strings.Contains(out.String(), "for example 10.8.0.1 with WireGuard") || !strings.Contains(out.String(), "without scheme nor port") {
+		t.Errorf("the address question gives examples, and says what it refuses:\n%s", out)
 	}
 	p, _ = answer("maybe\nn\n")
 	if p.confirm("Write it?", true) {

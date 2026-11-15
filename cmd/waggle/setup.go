@@ -365,23 +365,26 @@ func (p *prompt) shareQuestion(tunnels, links []config.Link, def string) string 
 		choice = len(names)
 	}
 	fmt.Fprintln(p.out, "\nDo other devices, a workstation or a phone, reach this machine's stacks?")
+	if n := p.choose(options, choice); names[n-1] != "" {
+		return names[n-1]
+	}
+	return p.otherQuestion(others, def)
+}
+
+// choose shows numbered options, and returns the one chosen, from 1.
+func (p *prompt) choose(options []string, def int) int {
 	for i, o := range options {
 		fmt.Fprintf(p.out, "  %d. %s\n", i+1, o)
 	}
 	for {
-		fmt.Fprintf(p.out, "Your choice [%d]: ", choice)
+		fmt.Fprintf(p.out, "Your choice [%d]: ", def)
 		text := p.read()
-		n := choice
-		if text != "" {
-			var err error
-			if n, err = strconv.Atoi(text); err != nil || n < 1 || n > len(names) {
-				continue
-			}
+		if text == "" {
+			return def
 		}
-		if names[n-1] != "" {
-			return names[n-1]
+		if n, err := strconv.Atoi(text); err == nil && n >= 1 && n <= len(options) {
+			return n
 		}
-		return p.otherQuestion(others, def)
 	}
 }
 
@@ -407,18 +410,37 @@ func (p *prompt) otherQuestion(others []config.Link, def string) string {
 	}
 }
 
+// relayQuestion asks whether this machine also works with a server, ways 2 and 3 of the README, then the server's
+// address, which it tries at once.
 func (p *prompt) relayQuestion(def string) string {
-	fmt.Fprintln(p.out, "\nDoes this machine also open the stacks of a server, through a VPN?")
+	choice := 1
+	if def != none {
+		choice = 2
+	}
+	fmt.Fprintln(p.out, "\nDo you also work on a server, and open its stacks from this machine?")
+	if p.choose([]string{
+		"No: this machine opens its own stacks only (run waggle setup again the day it does)",
+		"Yes, through a VPN: this machine passes on to the server what it does not serve",
+	}, choice) == 1 {
+		return none
+	}
+	fmt.Fprintln(p.out, "The server's address on the VPN, as this machine reaches it: for example 10.8.0.1 with WireGuard,")
+	fmt.Fprintln(p.out, "100.101.102.103 or my-server.tail1234.ts.net with Tailscale.")
 	for {
-		fmt.Fprintf(p.out, "Its address, or name, on the VPN; none if it does not [%s]: ", def)
+		if def != none {
+			fmt.Fprintf(p.out, "Address [%s]: ", def)
+		} else {
+			fmt.Fprint(p.out, "Address: ")
+		}
 		text := p.read()
 		if text == "" {
 			text = def
 		}
 		if text == none {
-			return none
+			continue
 		}
 		if strings.ContainsAny(text, " /:") {
+			fmt.Fprintln(p.out, "  an address or a name only, without scheme nor port")
 			continue
 		}
 		list, err := publish.Lookup(context.Background(), text, 53)

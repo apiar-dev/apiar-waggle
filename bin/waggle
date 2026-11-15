@@ -25,6 +25,8 @@ config=${WAGGLE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/waggle/config.yaml}
 state=${WAGGLE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/waggle}
 image=${WAGGLE_IMAGE:-waggle:local}
 os=${WAGGLE_OS:-$(uname -s)}
+# No advice from the Docker CLI after a command that fails: the error is waggle's to explain
+export DOCKER_CLI_HINTS=false
 
 # trusted CERT: whether the user's trust settings already hold this certificate. macOS files them under the
 # certificate's SHA-1 fingerprint.

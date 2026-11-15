@@ -69,12 +69,17 @@ installation ; on la relance pour changer d'avis.
 
   Une interface de VPN est détectée, quel que soit le VPN : WireGuard, Tailscale, NetBird, ZeroTier, Nebula, OpenVPN.
   Une autre interface, un réseau local par exemple, ne sert que si on la choisit.
-- **Sur une machine qui ne partage pas**, un Mac toujours : ouvre-t-elle aussi les stacks d'un serveur ? Si oui, son
-  adresse sur le VPN. waggle lui demande aussitôt ce qu'il sert.
+- **Sur une machine qui ne partage pas**, un Mac toujours : travaille-t-on aussi sur un serveur, dont elle ouvre les
+  stacks ? Si oui, l'adresse du serveur sur le VPN, et waggle lui demande aussitôt ce qu'il sert.
 
   ```
-  Does this machine also open the stacks of a server, through a VPN?
-  Its address, or name, on the VPN; none if it does not [none]: 100.101.102.103
+  Do you also work on a server, and open its stacks from this machine?
+    1. No: this machine opens its own stacks only (run waggle setup again the day it does)
+    2. Yes, through a VPN: this machine passes on to the server what it does not serve
+  Your choice [1]: 2
+  The server's address on the VPN, as this machine reaches it: for example 10.8.0.1 with WireGuard,
+  100.101.102.103 or my-server.tail1234.ts.net with Tailscale.
+  Address: 100.101.102.103
     it serves http://localhost, https://dev.example.com, tls://dev.legacy.com, on ports [3000]
   ```
 
