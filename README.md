@@ -17,15 +17,15 @@ Le plan de cet incrément : [`docs/plans/increment-1.md`](docs/plans/increment-1
 
 ## Installer waggle sur une machine
 
-Il faut Docker (Docker Desktop sur un Mac, Docker Engine sur un serveur Linux), git, et `gh`, connecté à un compte
-GitHub. Puis, sur un Mac comme sur un serveur :
+Il faut Docker (Docker Desktop sur un Mac, Docker Engine sur un serveur Linux), git et curl. Le dépôt est public : aucun
+compte GitHub n'est nécessaire. Puis, sur un Mac comme sur un serveur :
 
 ```bash
-gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
+curl -fsSL https://raw.githubusercontent.com/apiar-dev/apiar-waggle/main/install.sh | sh
 ```
 
 Le script, [`install.sh`](install.sh) :
-1. vérifie git, `gh` et Docker ;
+1. vérifie git et Docker ;
 2. clone ce dépôt dans `~/.local/share/waggle`. Chaque machine y construit l'image de waggle ;
 3. lie la commande dans `~/.local/bin/waggle`. Si ce dossier n'est pas dans le `PATH`, il affiche la ligne à ajouter au
    fichier du shell, sans y toucher lui-même ;
@@ -47,7 +47,7 @@ Les réglages du script :
 Pour essayer une branche :
 
 ```bash
-gh api 'repos/apiar-dev/apiar-waggle/contents/install.sh?ref=my-branch' -H 'Accept: application/vnd.github.raw+json' | WAGGLE_REF=my-branch sh
+curl -fsSL https://raw.githubusercontent.com/apiar-dev/apiar-waggle/my-branch/install.sh | WAGGLE_REF=my-branch sh
 ```
 
 Pour retirer waggle : `waggle uninstall --all`, puis supprimer `~/.local/bin/waggle` et `~/.local/share/waggle`.

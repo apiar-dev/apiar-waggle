@@ -3,9 +3,9 @@
 # version, rebuilds the image and restarts what changed. The first time, waggle setup asks the configuration
 # (README, ADR-0003, decision 6).
 #
-#   gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
+#   curl -fsSL https://raw.githubusercontent.com/apiar-dev/apiar-waggle/main/install.sh | sh
 #
-# gh, signed in to GitHub, fetches this script, then the clone.
+# The repository is public: neither this script nor the clone needs a GitHub account.
 #
 #   WAGGLE_REF       the branch or tag to install, main by default;
 #   WAGGLE_HOME      the clone, ~/.local/share/waggle by default;
@@ -25,9 +25,6 @@ fail() {
 	exit 1
 }
 
-# git with gh's credentials only, whatever the global configuration holds
-git_gh() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
-
 check() {
 	case "$os" in
 	Darwin | Linux) ;;
@@ -38,8 +35,6 @@ check() {
 		[ "$os" = Darwin ] && fail "git is missing: run xcode-select --install, then run this again"
 		fail "git is missing: install it with the system's package manager"
 	}
-	command -v gh >/dev/null 2>&1 || fail "gh is missing: https://cli.github.com, then gh auth login"
-	gh auth status >/dev/null 2>&1 || fail "gh is not signed in: run gh auth login"
 	command -v docker >/dev/null 2>&1 || fail "docker is missing: Docker Desktop on a Mac, Docker Engine on Linux"
 	docker info >/dev/null 2>&1 || {
 		[ "$os" = Darwin ] && fail "Docker does not answer: start Docker Desktop"
@@ -52,7 +47,7 @@ fetch() {
 	if [ -d "$home/.git" ]; then
 		git -C "$home" diff --quiet HEAD -- || fail "$home has local changes: commit or discard them, then run this again"
 		before=$(git -C "$home" rev-parse --short HEAD)
-		git_gh -C "$home" fetch --quiet origin "$ref"
+		git -C "$home" fetch --quiet origin "$ref"
 		git -C "$home" checkout --quiet --detach FETCH_HEAD
 		after=$(git -C "$home" rev-parse --short HEAD)
 		if [ "$before" = "$after" ]; then
@@ -65,7 +60,7 @@ fetch() {
 	else
 		say "cloning $repo ($ref) into $home"
 		mkdir -p "$(dirname -- "$home")"
-		git_gh clone --quiet --branch "$ref" "https://github.com/$repo.git" "$home"
+		git clone --quiet --branch "$ref" "https://github.com/$repo.git" "$home"
 	fi
 }
 
