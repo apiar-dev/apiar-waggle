@@ -17,8 +17,8 @@ Le plan de cet incrément : [`docs/plans/increment-1.md`](docs/plans/increment-1
 
 ## Installer waggle sur une machine
 
-Il faut Docker (Docker Desktop sur un Mac, Docker Engine sur un serveur Linux), git, et `gh`, connecté à un compte qui
-peut lire ce dépôt : il est privé. Puis, sur un Mac comme sur un serveur :
+Il faut Docker (Docker Desktop sur un Mac, Docker Engine sur un serveur Linux), git, et `gh`, connecté à un compte
+GitHub. Puis, sur un Mac comme sur un serveur :
 
 ```bash
 gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
@@ -47,7 +47,7 @@ Les réglages du script :
 Pour essayer une branche :
 
 ```bash
-gh api 'repos/apiar-dev/apiar-waggle/contents/install.sh?ref=increment-1' -H 'Accept: application/vnd.github.raw+json' | WAGGLE_REF=increment-1 sh
+gh api 'repos/apiar-dev/apiar-waggle/contents/install.sh?ref=my-branch' -H 'Accept: application/vnd.github.raw+json' | WAGGLE_REF=my-branch sh
 ```
 
 Pour retirer waggle : `waggle uninstall --all`, puis supprimer `~/.local/bin/waggle` et `~/.local/share/waggle`.

@@ -5,7 +5,7 @@
 #
 #   gh api repos/apiar-dev/apiar-waggle/contents/install.sh -H 'Accept: application/vnd.github.raw+json' | sh
 #
-# The repository is private: gh, signed in to an account that can read it, fetches this script, then the clone.
+# gh, signed in to GitHub, fetches this script, then the clone.
 #
 #   WAGGLE_REF       the branch or tag to install, main by default;
 #   WAGGLE_HOME      the clone, ~/.local/share/waggle by default;
@@ -25,8 +25,7 @@ fail() {
 	exit 1
 }
 
-# git with gh's credentials only, whatever the global configuration holds: the clone is private, and the account gh is
-# signed in to is the one that can read it
+# git with gh's credentials only, whatever the global configuration holds
 git_gh() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 
 check() {
@@ -40,7 +39,7 @@ check() {
 		fail "git is missing: install it with the system's package manager"
 	}
 	command -v gh >/dev/null 2>&1 || fail "gh is missing: https://cli.github.com, then gh auth login"
-	gh auth status >/dev/null 2>&1 || fail "gh is not signed in: run gh auth login, with an account that can read $repo"
+	gh auth status >/dev/null 2>&1 || fail "gh is not signed in: run gh auth login"
 	command -v docker >/dev/null 2>&1 || fail "docker is missing: Docker Desktop on a Mac, Docker Engine on Linux"
 	docker info >/dev/null 2>&1 || {
 		[ "$os" = Darwin ] && fail "Docker does not answer: start Docker Desktop"
