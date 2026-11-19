@@ -167,6 +167,8 @@ Sur la machine du navigateur, quelque chose doit donc écouter sur `127.0.0.1`.
      stack arrêtée y reste.
    - **À chaque `waggle up`, le poste la lit**, relaie ces domaines et publie ces ports. Si le
      serveur ne répond pas, il garde la dernière liste lue.
+   - **Le poste la lit en TCP.** Docker Desktop, où tourne le waggle d'un Mac, ne fait pas
+     passer l'UDP vers l'adresse d'un VPN ; le TCP passe. Le DNS du serveur répond aux deux.
    - **Une nouvelle stack d'un projet connu ne demande rien.** Un nouveau projet sur le
      serveur demande un `waggle up` sur le poste, et `waggle status` le signale.
    - **`domains:` reste possible, à la main.** Elle remplace la liste apprise : pour

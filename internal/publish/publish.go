@@ -77,11 +77,14 @@ func Parse(records []string) List {
 	return l
 }
 
-// Lookup asks a server's VPN DNS for its list. A server that published nothing yet answers an empty list.
+// Lookup asks a server's VPN DNS for its list, over TCP: Docker Desktop, where a Mac's waggle runs, does not carry UDP
+// to an address on the VPN, while TCP goes through. The server's DNS answers both. A server that published nothing yet
+// answers an empty list.
 func Lookup(ctx context.Context, server string, port int) (List, error) {
 	address := net.JoinHostPort(server, strconv.Itoa(port))
-	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, address)
+	// Given a stream rather than a packet connection, Go's resolver speaks DNS over TCP
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", address)
 	}}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

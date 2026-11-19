@@ -178,6 +178,7 @@ cette machine, et relaie au serveur ce qu'il ne sert pas ([ADR-0003](docs/adr/00
   - Il répond l'adresse de l'instance pour le nom de chaque stack servie sous un vrai domaine, et tout ce qui est dessous ;
     rien en AAAA. Il relaie le reste : jamais tout un domaine, qui prendrait les vrais sites de ce domaine.
   - Il publie aussi, pour les postes, la liste des domaines servis et des ports historiques (`relay.waggle`, en TXT).
+    Un poste la lit en TCP : Docker Desktop ne fait pas passer l'UDP vers l'adresse d'un VPN.
   - `dns: false` l'éteint, si le port 53 de l'adresse est déjà pris. Un poste doit alors écrire ses `domains`.
 - Un serveur ne relaie jamais : seul un poste a des `relays`.
 
